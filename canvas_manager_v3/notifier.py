@@ -64,7 +64,7 @@ class Notifier:
     def send_sms(self, sms_email: str, deadlines: list[dict], lookahead_days: int) -> str:
         """
         Send an SMS by emailing the carrier's SMS gateway address.
-        e.g. sms_email = '9496897324@tmomail.net'
+        e.g. sms_email = '1234567890@tmomail.net'
         Returns message ID.
         """
         body = _build_sms(deadlines, lookahead_days)

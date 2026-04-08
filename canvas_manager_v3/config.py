@@ -56,7 +56,7 @@ def get_sms_config() -> dict:
     """Return SMS gateway config derived from phone number + carrier."""
     phone_raw = _require(
         "TO_PHONE_NUMBER",
-        "Set TO_PHONE_NUMBER in your .env (e.g. +19496897324)",
+        "Set TO_PHONE_NUMBER in your .env (e.g. +11234567890)",
     )
     carrier = _require(
         "PHONE_CARRIER",
