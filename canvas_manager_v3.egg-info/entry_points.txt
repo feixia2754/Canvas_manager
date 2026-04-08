@@ -1,0 +1,2 @@
+[console_scripts]
+canvas-manager-v3 = canvas_manager_v3.main:cli

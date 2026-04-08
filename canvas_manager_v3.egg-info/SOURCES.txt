@@ -1,0 +1,13 @@
+pyproject.toml
+canvas_manager_v3/__init__.py
+canvas_manager_v3/canvas_client.py
+canvas_manager_v3/config.py
+canvas_manager_v3/ical_parser.py
+canvas_manager_v3/main.py
+canvas_manager_v3/notifier.py
+canvas_manager_v3.egg-info/PKG-INFO
+canvas_manager_v3.egg-info/SOURCES.txt
+canvas_manager_v3.egg-info/dependency_links.txt
+canvas_manager_v3.egg-info/entry_points.txt
+canvas_manager_v3.egg-info/requires.txt
+canvas_manager_v3.egg-info/top_level.txt

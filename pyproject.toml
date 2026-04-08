@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canvas-manager-v3"
+version = "0.1.0"
+description = "Canvas + iCal deadlines → email and SMS reminders via Gmail API (no Twilio)"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "click",
+    "python-dotenv",
+    "icalendar",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "rich",
+]
+
+[project.scripts]
+canvas-manager-v3 = "canvas_manager_v3.main:cli"

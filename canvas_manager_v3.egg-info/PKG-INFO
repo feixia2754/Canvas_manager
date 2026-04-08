@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: canvas-manager-v3
+Version: 0.1.0
+Summary: Canvas + iCal deadlines → email and SMS reminders via Gmail API (no Twilio)
+Requires-Python: >=3.10
+Requires-Dist: requests
+Requires-Dist: click
+Requires-Dist: python-dotenv
+Requires-Dist: icalendar
+Requires-Dist: google-api-python-client
+Requires-Dist: google-auth-httplib2
+Requires-Dist: google-auth-oauthlib
+Requires-Dist: rich
