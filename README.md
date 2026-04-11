@@ -1,6 +1,18 @@
-# Canvas Manager V3
+# Canvas Manager
 
-Fetches Canvas assignments and iCal deadlines, then sends you email and SMS reminders — no Twilio required. Uses the Gmail API to send both.
+Automatically fetches your Canvas assignments and Google Calendar events, then sends you daily email and SMS reminders — no Twilio required. Uses the Gmail API to send both.
+
+---
+
+## Features
+
+- Fetches upcoming assignments directly from Canvas
+- Fetches events from Google Calendar automatically (no manual `.ics` import needed)
+- Sends formatted HTML email reminders with due dates and submission status
+- Sends SMS reminders via your carrier's email-to-SMS gateway
+- Shows `✓ submitted` indicator for already-submitted Canvas assignments
+- Daily cron job syncs and sends reminders automatically every morning
+- Interactive `setup` command — no manual file editing required
 
 ---
 
@@ -8,7 +20,8 @@ Fetches Canvas assignments and iCal deadlines, then sends you email and SMS remi
 
 - Python 3.10+
 - A Canvas account with API access
-- A Gmail account (used to send emails and SMS)
+- A Gmail account (used to send email and SMS)
+- A Google Cloud project with **Gmail API** and **Google Calendar API** enabled
 - A US phone number and your carrier name
 
 ---
@@ -19,7 +32,7 @@ Fetches Canvas assignments and iCal deadlines, then sends you email and SMS remi
 pip install .
 ```
 
-This installs the `canvas-manager-v3` command globally.
+This installs the `canvas-manager` command.
 
 ---
 
@@ -27,20 +40,22 @@ This installs the `canvas-manager-v3` command globally.
 
 ### Step 1 — Get your Canvas API token
 
-1. Log in to your Canvas account (e.g. `https://canvas.youruniversity.edu`)
+1. Log in to Canvas (e.g. `https://canvas.youruniversity.edu`)
 2. Go to **Account → Settings**
-3. Scroll down to **Approved Integrations**
-4. Click **New Access Token**
-5. Give it a name, set an expiry if you want, then click **Generate Token**
-6. Copy the token — you will only see it once
+3. Scroll to **Approved Integrations → New Access Token**
+4. Give it a name, click **Generate Token**, and copy it — you only see it once
 
-### Step 2 — Get your Google OAuth credentials
+---
 
-This lets the app send email and SMS through your Gmail account.
+### Step 2 — Set up Google Cloud credentials
+
+This allows the app to send emails/SMS via Gmail and read your Google Calendar.
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a new project (or use an existing one)
-3. Go to **APIs & Services → Library** and enable the **Gmail API**
+3. Go to **APIs & Services → Library** and enable:
+   - **Gmail API**
+   - **Google Calendar API**
 4. Go to **APIs & Services → OAuth consent screen**
    - Choose **External**, fill in the app name and your email
    - Add your Gmail address as a test user
@@ -48,48 +63,188 @@ This lets the app send email and SMS through your Gmail account.
    - Click **Create Credentials → OAuth client ID**
    - Choose **Desktop app**
    - Click **Download JSON**
-6. Rename the downloaded file to `credentials.json` and place it in the directory where you run the command
+6. Rename the downloaded file to exactly `credentials.json` and place it in the project directory
 
-> The first time you run `remind`, a browser window will open asking you to authorize the app. After that, a `token_v3.json` file is created automatically and reused. **Do not commit either file to git.**
+> **Note:** Google names the downloaded file with a long ID (e.g. `client_secret_....json`). It must be renamed to `credentials.json` or the app will not find it.
 
-### Step 3 — Create your `.env` file
+> The first time you run `sync`, a browser window opens for you to authorize the app. A `token.json` file is created automatically and reused. **Do not commit either file to git.**
 
-In the same directory where you run the command, create a file named `.env`:
+---
 
-```env
-# Canvas
-CANVAS_BASE_URL=https://canvas.youruniversity.edu
-CANVAS_API_TOKEN=your_canvas_token_here
+### Step 3 — Run the interactive setup
 
-# Email recipient
-TO_EMAIL_ADDRESS=you@example.com
-FROM_NAME=Canvas Manager
-
-# SMS recipient
-TO_PHONE_NUMBER=+11234567890
-PHONE_CARRIER=tmobile
-
-# Reminder settings
-REMINDER_LOOKAHEAD_DAYS=3
-REMINDER_TIME=08:00
+```bash
+canvas-manager setup
 ```
 
-#### Field reference
+This walks you through all configuration interactively — no manual file editing needed:
 
-| Field | What to put here |
-|---|---|
-| `CANVAS_BASE_URL` | Your school's Canvas URL (no trailing slash) |
-| `CANVAS_API_TOKEN` | The token you copied from Canvas settings |
-| `TO_EMAIL_ADDRESS` | The email address to send reminders to |
-| `FROM_NAME` | Display name shown on sent emails (optional, default: `Canvas Manager`) |
-| `TO_PHONE_NUMBER` | Your 10-digit US phone number, with or without `+1` |
-| `PHONE_CARRIER` | Your carrier — see supported carriers below |
-| `REMINDER_LOOKAHEAD_DAYS` | How many days ahead to look for deadlines (default: `3`) |
-| `REMINDER_TIME` | Used by the cron command to set the send time, in `HH:MM` 24h format |
+```
+────────── Canvas Manager — Setup ──────────
 
-#### Supported carriers for SMS
+Canvas
+  Canvas base URL [https://canvas.cmu.edu]:
+  Canvas API token:
+  Verifying Canvas credentials... OK
 
-| Value to use | Carrier |
+Email
+  Send reminders to (email):
+
+SMS
+  Your phone number (e.g. +11234567890):
+  Your carrier (tmobile/att/verizon/...):
+
+Google Calendar
+  Google Calendar ID [primary]:
+
+Reminder settings
+  Daily reminder time (HH:MM, 24h) [08:00]:
+  Days ahead to include in reminders [3]:
+
+✓ Saved config to .env
+  Install daily cron job? [Y/n]: Y
+✓ Cron job set for 08:00 daily
+```
+
+The setup command:
+- Validates your Canvas URL and token with a live API call
+- Validates your Google Calendar ID against the Calendar API
+- Writes all settings to `.env`
+- Installs the daily cron job automatically
+
+---
+
+### Step 4 — Fetch your first deadlines
+
+```bash
+canvas-manager sync
+```
+
+Fetches upcoming assignments from Canvas and events from Google Calendar, merges them, and saves locally.
+
+---
+
+### Step 5 — Preview your reminder
+
+```bash
+canvas-manager remind --preview
+```
+
+Shows what the email and SMS will look like without sending anything.
+
+---
+
+## Commands
+
+### `setup`
+Interactive first-time configuration. Fills `.env` and installs the cron job.
+
+```bash
+canvas-manager setup
+```
+
+---
+
+### `sync`
+Fetch the latest assignments from Canvas and events from Google Calendar.
+
+```bash
+canvas-manager sync
+
+# Skip Google Calendar and fetch Canvas only
+canvas-manager sync --no-gcal
+```
+
+---
+
+### `list`
+Show upcoming deadlines from the local cache.
+
+```bash
+canvas-manager list
+canvas-manager list --days 7
+```
+
+Defaults to 14 days ahead. Shows source (`canvas` or `gcal`) and submission status.
+
+---
+
+### `remind`
+Send email and/or SMS reminders.
+
+```bash
+# Send both email and SMS
+canvas-manager remind
+
+# Preview without sending
+canvas-manager remind --preview
+
+# Email only
+canvas-manager remind --email-only
+
+# SMS only
+canvas-manager remind --sms-only
+
+# Override lookahead window
+canvas-manager remind --days 5
+
+# Send to a different email address
+canvas-manager remind --to-email someone@example.com
+```
+
+---
+
+### `setup-cron`
+Print the crontab line for daily reminders (already installed by `setup`, use this to change the time).
+
+```bash
+canvas-manager setup-cron
+canvas-manager setup-cron --time 09:30
+```
+
+Add the printed line to your crontab with `crontab -e`.
+
+---
+
+### `import-ical`
+Manually import a `.ics` calendar file and merge it with Canvas (optional — `sync` handles this automatically via Google Calendar).
+
+```bash
+canvas-manager import-ical ~/Downloads/calendar.ics
+canvas-manager import-ical   # prompts for the file path
+```
+
+---
+
+## How the daily cron works
+
+Once set up, every morning at your chosen time the cron runs:
+
+```
+canvas-manager sync && canvas-manager remind
+```
+
+1. `sync` — fetches fresh assignments from Canvas + Google Calendar
+2. `remind` — sends the email and SMS with everything due in the next N days
+
+Logs are written to `~/.canvas_manager.log`.
+
+---
+
+## Google Calendar ID
+
+By default the app uses your primary Google Calendar. To use a different calendar:
+
+1. Open [Google Calendar](https://calendar.google.com)
+2. Click the three dots next to the calendar → **Settings**
+3. Scroll to **Calendar ID** (looks like `abc123@group.calendar.google.com`)
+4. Enter it when prompted during `setup`, or update `GCAL_CALENDAR_ID` in `.env`
+
+---
+
+## Supported SMS carriers
+
+| Value | Carrier |
 |---|---|
 | `tmobile` or `t-mobile` | T-Mobile |
 | `att` or `at&t` | AT&T |
@@ -102,92 +257,25 @@ REMINDER_TIME=08:00
 
 ---
 
-## Usage
-
-### Fetch assignments from Canvas
-
-```bash
-canvas-manager-v3 sync
-```
-
-Pulls all upcoming assignments from Canvas and saves them locally.
-
-### Import an iCal file
-
-```bash
-canvas-manager-v3 import-ical ~/Downloads/calendar.ics
-```
-
-Or run without arguments and paste/drag the file path when prompted:
-
-```bash
-canvas-manager-v3 import-ical
-```
-
-Merges the iCal events with your Canvas assignments and saves them locally.
-
-### List upcoming deadlines
-
-```bash
-canvas-manager-v3 list
-canvas-manager-v3 list --days 7
-```
-
-Shows deadlines from the local cache. Defaults to 14 days ahead.
-
-### Send reminders
-
-```bash
-# Send both email and SMS
-canvas-manager-v3 remind
-
-# Preview without sending
-canvas-manager-v3 remind --preview
-
-# Email only
-canvas-manager-v3 remind --email-only
-
-# SMS only
-canvas-manager-v3 remind --sms-only
-
-# Override how many days ahead to include
-canvas-manager-v3 remind --days 5
-
-# Send to a different email address
-canvas-manager-v3 remind --to-email someone@example.com
-```
-
-### Set up daily automatic reminders (cron)
-
-```bash
-canvas-manager-v3 setup-cron
-```
-
-Prints a crontab line you can paste into `crontab -e`. Uses the `REMINDER_TIME` from your `.env` by default, or override it:
-
-```bash
-canvas-manager-v3 setup-cron --time 09:00
-```
-
----
-
 ## File reference
 
 | File | Purpose |
 |---|---|
-| `.env` | Your tokens, phone number, email, and settings — **never commit this** |
-| `credentials.json` | Google OAuth app credentials downloaded from Google Cloud — **never commit this** |
-| `token_v3.json` | Auto-generated Gmail access token — **never commit this** |
-| `.canvas_manager_v3_deadlines.json` | Local cache of your deadlines — safe to ignore in git |
+| `.env` | All your settings and tokens — **never commit this** |
+| `credentials.json` | Google OAuth credentials from Cloud Console — **never commit this** |
+| `token.json` | Auto-generated Google access token — **never commit this** |
+| `.canvas_manager_deadlines.json` | Local cache of deadlines — safe to gitignore |
 
 ---
 
-## Security note
+## Security
 
-Your `.env` and `credentials.json` contain sensitive credentials. Make sure they are listed in your `.gitignore`:
+The following files contain sensitive credentials and are excluded from git by default:
 
 ```
 .env
 credentials.json
-token_v3.json
+token.json
 ```
+
+Never share or commit these files.
