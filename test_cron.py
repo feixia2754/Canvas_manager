@@ -125,6 +125,7 @@ class TestFilePathsAreAbsolute(unittest.TestCase):
         self.assertEqual(DEADLINES_CACHE.parent, PROJECT_DIR)
 
 
+@unittest.skipIf(os.getenv("CI"), "Skipped in CI — no live crontab in GitHub Actions")
 class TestLiveCrontab(unittest.TestCase):
     """The system crontab has the expected canvas-manager entries."""
 

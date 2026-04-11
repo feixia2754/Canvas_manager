@@ -1,0 +1,117 @@
+name: Canvas Manager Tests
+
+on:
+  push:
+    branches: [main, v5]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e .
+
+      # ── Write config files from secrets ──────────────────────────────────────
+
+      - name: Write .env from secrets
+        env:
+          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
+          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+          TO_EMAIL_ADDRESS: ${{ secrets.TO_EMAIL_ADDRESS }}
+          TO_PHONE_NUMBER: ${{ secrets.TO_PHONE_NUMBER }}
+          PHONE_CARRIER: ${{ secrets.PHONE_CARRIER }}
+          GCAL_CALENDAR_ID: ${{ secrets.GCAL_CALENDAR_ID }}
+        run: |
+          printf 'CANVAS_BASE_URL=%s\n'            "$CANVAS_BASE_URL"   >> .env
+          printf 'CANVAS_API_TOKEN=%s\n'           "$CANVAS_API_TOKEN"  >> .env
+          printf 'TO_EMAIL_ADDRESS=%s\n'           "$TO_EMAIL_ADDRESS"  >> .env
+          printf 'FROM_NAME=Canvas Manager\n'                           >> .env
+          printf 'TO_PHONE_NUMBER=%s\n'            "$TO_PHONE_NUMBER"   >> .env
+          printf 'PHONE_CARRIER=%s\n'              "$PHONE_CARRIER"     >> .env
+          printf 'REMINDER_LOOKAHEAD_DAYS=3\n'                          >> .env
+          printf 'REMINDER_TIME=08:00\n'                                >> .env
+          printf 'GCAL_CALENDAR_ID=%s\n'           "$GCAL_CALENDAR_ID"  >> .env
+          printf 'GCAL_DAYS_AHEAD=30\n'                                 >> .env
+
+      - name: Write credentials.json from secret
+        run: echo "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" | base64 -d > credentials.json
+
+      - name: Write token.json from secret
+        run: echo "${{ secrets.GOOGLE_TOKEN_B64 }}" | base64 -d > token.json
+
+      # ── CLI smoke tests ───────────────────────────────────────────────────────
+
+      - name: CLI -- help
+        run: canvas-manager --help
+
+      - name: CLI -- setup-cron (default 08:00)
+        run: canvas-manager setup-cron
+
+      - name: CLI -- setup-cron --time 21:45
+        run: |
+          output=$(canvas-manager setup-cron --time 21:45)
+          echo "$output"
+          echo "$output" | grep -q "45 21"
+
+      - name: CLI -- sync (Canvas + Google Calendar)
+        run: canvas-manager sync
+
+      - name: CLI -- sync --no-gcal (Canvas only)
+        run: canvas-manager sync --no-gcal
+
+      - name: CLI -- list
+        run: canvas-manager list
+
+      - name: CLI -- list --days 7
+        run: canvas-manager list --days 7
+
+      - name: CLI -- remind --preview (both channels)
+        run: |
+          output=$(canvas-manager remind --preview)
+          echo "$output"
+          echo "$output" | grep -qi "nothing sent\|EMAIL PREVIEW\|SMS PREVIEW\|No upcoming"
+
+      - name: CLI -- remind --preview --email-only
+        run: |
+          output=$(canvas-manager remind --preview --email-only)
+          echo "$output"
+          echo "$output" | grep -qi "EMAIL PREVIEW\|nothing sent\|No upcoming"
+
+      - name: CLI -- remind --preview --sms-only
+        run: |
+          output=$(canvas-manager remind --preview --sms-only)
+          echo "$output"
+          echo "$output" | grep -qi "SMS PREVIEW\|nothing sent\|No upcoming"
+
+      # ── Error-case tests ──────────────────────────────────────────────────────
+
+      - name: Error -- remind --preview with no cache warns user
+        run: |
+          rm -f .canvas_manager_deadlines.json
+          output=$(canvas-manager remind --preview)
+          echo "$output"
+          echo "$output" | grep -q "No cache found"
+
+      - name: Error -- sync with invalid Canvas token exits non-zero
+        env:
+          BAD_TOKEN: badtoken123
+        run: |
+          cp .env .env.bak
+          sed -i 's/^CANVAS_API_TOKEN=.*/CANVAS_API_TOKEN=badtoken123/' .env
+          canvas-manager sync --no-gcal && echo "Expected failure but got success" && exit 1 || true
+          cp .env.bak .env
+
+      # ── pytest suite ─────────────────────────────────────────────────────────
+
+      - name: pytest test_cron.py
+        run: python -m pytest test_cron.py -v
