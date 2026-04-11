@@ -7,41 +7,63 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
-CREDS_FILE = "credentials.json"
-TOKEN_FILE = "token_v3.json"
+# Resolve paths relative to the project root (parent of this file's package dir)
+_PKG_DIR = Path(__file__).parent
+_PROJECT_DIR = _PKG_DIR.parent
+
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar.readonly",
+]
+CREDS_FILE = str(_PROJECT_DIR / "credentials.json")
+TOKEN_FILE = str(_PROJECT_DIR / "token_v4.json")
 
 
-def get_gmail_service():
+def get_credentials() -> Credentials:
+    """Load (or refresh/create) OAuth credentials covering Gmail + Calendar scopes."""
+    import sys
     creds: Optional[Credentials] = None
+
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        # If the saved token is missing the calendar scope, force re-auth
+        if creds.scopes and not set(SCOPES).issubset(set(creds.scopes)):
+            creds = None
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             if not os.path.exists(CREDS_FILE):
-                import sys
                 print(
-                    "Error: credentials.json not found.\n"
-                    "  Place your Google OAuth credentials.json in this directory."
+                    f"Error: credentials.json not found in {_PROJECT_DIR}.\n"
+                    "  The file may be missing or named incorrectly.\n"
+                    "  Rename your Google OAuth credentials file to exactly: credentials.json"
                 )
                 sys.exit(1)
             flow = InstalledAppFlow.from_client_secrets_file(CREDS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
         with open(TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
-    return build("gmail", "v1", credentials=creds)
+
+    return creds
+
+
+def get_gmail_service():
+    return build("gmail", "v1", credentials=get_credentials())
 
 
 class Notifier:
@@ -87,10 +109,19 @@ class Notifier:
         msg["To"] = to
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        result = self.service.users().messages().send(
-            userId="me", body={"raw": raw}
-        ).execute()
-        return result["id"]
+
+        # Retry up to 3 times on temporary failures (4xx/5xx)
+        for attempt in range(3):
+            try:
+                result = self.service.users().messages().send(
+                    userId="me", body={"raw": raw}
+                ).execute()
+                return result["id"]
+            except HttpError as e:
+                if attempt < 2 and e.status_code in (429, 500, 502, 503, 504):
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +154,8 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         days_left = (local_due.date() - now.astimezone().date()).days
         due_str = local_due.strftime("%a %b %d at %I:%M %p")
         urgency = "DUE TODAY" if days_left == 0 else ("Due tomorrow" if days_left == 1 else f"Due in {days_left}d")
-        plain_lines += [f"[{urgency}] {item.get('course', '')} — {item['name']}", f"  Due: {due_str}", ""]
+        submitted_str = " ✓ submitted" if item.get("submitted") else ""
+        plain_lines += [f"[{urgency}]{submitted_str} {item.get('course', '')} — {item['name']}", f"  Due: {due_str}", ""]
     plain = "\n".join(plain_lines)
 
     # HTML
@@ -146,12 +178,13 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         url = item.get("url", "")
         name = item["name"]
         name_html = f'<a href="{url}" style="color:#1a73e8;">{name}</a>' if url else name
+        submitted_html = ' <span style="color:#2e7d32;font-weight:bold;">✓ submitted</span>' if item.get("submitted") else ""
 
         rows += f"""
         <tr style="background:{row_bg};">
           <td style="padding:10px 12px;border-bottom:1px solid #eee;">{urgency_html}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#555;">{item.get('course','')}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #eee;">{name_html}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eee;">{name_html}{submitted_html}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#555;">{due_str}</td>
         </tr>"""
 
@@ -168,7 +201,7 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
-  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager-v3</p>
+  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager-v4</p>
 </body></html>"""
 
     return subject, html, plain

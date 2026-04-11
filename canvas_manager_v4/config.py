@@ -2,9 +2,11 @@
 
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from the project root regardless of cwd (needed for cron)
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 # Carrier SMS gateway map
 CARRIER_GATEWAYS = {
@@ -83,6 +85,13 @@ def get_sms_config() -> dict:
         "sms_email": f"{digits}@{gateway}",
         "phone": phone_raw,
         "carrier": carrier,
+    }
+
+
+def get_gcal_config() -> dict:
+    return {
+        "calendar_id": os.getenv("GCAL_CALENDAR_ID", "primary"),
+        "days_ahead": int(os.getenv("GCAL_DAYS_AHEAD", "30")),
     }
 
 

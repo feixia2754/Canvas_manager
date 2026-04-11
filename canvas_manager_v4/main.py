@@ -1,4 +1,4 @@
-"""CLI entry point for canvas-manager-v3."""
+"""CLI entry point for canvas-manager-v4."""
 
 from __future__ import annotations
 
@@ -13,18 +13,20 @@ from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt
 
-from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config
+from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config, get_gcal_config
 from .canvas_client import CanvasClient, parse_due_date
+from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
-from .notifier import Notifier
+from .notifier import Notifier, get_credentials
 
 console = Console()
-DEADLINES_CACHE = Path(".canvas_manager_v3_deadlines.json")
+# Store cache in the project root so it's always found regardless of cwd
+DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_v4_deadlines.json"
 
 
 @click.group()
 def cli() -> None:
-    """Canvas Manager V3 — Canvas + iCal → email & SMS reminders (no Twilio)."""
+    """Canvas Manager V4 — Canvas + Google Calendar → email & SMS reminders."""
     pass
 
 
@@ -41,8 +43,8 @@ def import_ical(ical_file: str | None) -> None:
 
     \b
     Example:
-      canvas-manager-v3 import-ical ~/Downloads/calendar.ics
-      canvas-manager-v3 import-ical
+      canvas-manager-v4 import-ical ~/Downloads/calendar.ics
+      canvas-manager-v4 import-ical
     """
     if not ical_file:
         ical_file = Prompt.ask("Path to your .ics file").strip().strip("'\"")
@@ -68,7 +70,7 @@ def import_ical(ical_file: str | None) -> None:
 
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
-    console.print(f"\n[dim]Saved. Run [bold]canvas-manager-v3 remind[/bold] to send notifications.[/dim]")
+    console.print(f"\n[dim]Saved. Run [bold]canvas-manager-v4 remind[/bold] to send notifications.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -76,29 +78,59 @@ def import_ical(ical_file: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command()
-def sync() -> None:
-    """Fetch upcoming assignments from Canvas and save locally."""
+@click.option("--no-gcal", "skip_gcal", is_flag=True, default=False, help="Skip Google Calendar fetch.")
+def sync(skip_gcal: bool) -> None:
+    """Fetch upcoming deadlines from Canvas + Google Calendar and save locally."""
+    deadlines: list[dict] = []
+
+    # --- Canvas ---
     canvas_cfg = get_canvas_config()
     console.print("[bold]Fetching Canvas assignments...[/bold]", end=" ")
     canvas = CanvasClient(canvas_cfg["base_url"], canvas_cfg["token"])
     assignments = canvas.get_all_upcoming_assignments()
-    console.print(f"[green]done ({len(assignments)} found)[/green]\n")
-
-    deadlines = []
+    console.print(f"[green]done ({len(assignments)} found)[/green]")
     for a in assignments:
         due = parse_due_date(a["due_at"])
         deadlines.append({
             "name": a["name"],
-            "due_at": due.isoformat(),
+            "due_at": due,
             "course": a.get("_course_name", "Unknown"),
             "url": a.get("html_url", ""),
             "source": "canvas",
+            "submitted": a.get("_submitted", False),
         })
-    deadlines.sort(key=lambda d: d["due_at"])
-    runtime = [dict(d, due_at=datetime.fromisoformat(d["due_at"])) for d in deadlines]
 
-    _print_table(runtime, title="Upcoming Canvas Assignments")
-    _save_cache(runtime)
+    # --- Google Calendar ---
+    if not skip_gcal:
+        gcal_cfg = get_gcal_config()
+        console.print("[bold]Fetching Google Calendar events...[/bold]", end=" ")
+        try:
+            creds = get_credentials()
+            gcal = GCalClient(creds)
+            gcal_events = gcal.get_upcoming_events(
+                days_ahead=gcal_cfg["days_ahead"],
+                calendar_id=gcal_cfg["calendar_id"],
+            )
+            console.print(f"[green]done ({len(gcal_events)} found)[/green]")
+
+            # Deduplicate: skip GCal events already covered by Canvas
+            from .ical_parser import _similar
+            from datetime import timedelta
+            tolerance = timedelta(hours=2)
+            for event in gcal_events:
+                is_dup = any(
+                    _similar(event["name"], d["name"])
+                    and abs(event["due_at"] - d["due_at"]) <= tolerance
+                    for d in deadlines
+                )
+                if not is_dup:
+                    deadlines.append(event)
+        except Exception as e:
+            console.print(f"[yellow]skipped (error: {e})[/yellow]")
+
+    deadlines.sort(key=lambda d: d["due_at"])
+    _print_table(deadlines, title="Upcoming Deadlines (Canvas + Google Calendar)")
+    _save_cache(deadlines)
     console.print(f"\n[dim]Saved {len(deadlines)} deadline(s).[/dim]")
 
 
@@ -147,11 +179,11 @@ def remind(
 
     \b
     Examples:
-      canvas-manager-v3 remind
-      canvas-manager-v3 remind --preview
-      canvas-manager-v3 remind --email-only
-      canvas-manager-v3 remind --sms-only
-      canvas-manager-v3 remind --days 5
+      canvas-manager-v4 remind
+      canvas-manager-v4 remind --preview
+      canvas-manager-v4 remind --email-only
+      canvas-manager-v4 remind --sms-only
+      canvas-manager-v4 remind --days 5
     """
     reminder_cfg = get_reminder_config()
     lookahead = days if days is not None else reminder_cfg["lookahead_days"]
@@ -226,12 +258,13 @@ def setup_cron(reminder_time: str | None) -> None:
         console.print(f"[red]Invalid time: {t}. Use HH:MM.[/red]")
         sys.exit(1)
 
-    cmd = which("canvas-manager-v3") or "canvas-manager-v3"
-    cron_line = f"{minute} {hour} * * * {cmd} remind >> ~/.canvas_manager_v3.log 2>&1"
+    cmd = which("canvas-manager-v4") or "canvas-manager-v4"
+    log = Path.home() / ".canvas_manager_v4.log"
+    cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} remind >> {log} 2>&1"
 
     console.print("[bold]Add this to your crontab ([bold]crontab -e[/bold]):[/bold]\n")
     console.print(f"  [cyan]{cron_line}[/cyan]\n")
-    console.print("[dim]Logs → ~/.canvas_manager_v3.log[/dim]")
+    console.print(f"[dim]Logs → {log}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +279,7 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
     table.add_column("Due", style="yellow")
     table.add_column("In", justify="right")
     table.add_column("Source", style="dim")
+    table.add_column("Status", style="green")
 
     now = datetime.now(tz=timezone.utc)
     for i, d in enumerate(deadlines, 1):
@@ -265,7 +299,8 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
             in_str = f"[yellow]{days_left}d[/yellow]"
         else:
             in_str = f"{days_left}d"
-        table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""))
+        submitted = "[green]✓ submitted[/green]" if d.get("submitted") else ""
+        table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), submitted)
 
     console.print(table)
 

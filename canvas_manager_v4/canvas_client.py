@@ -44,14 +44,27 @@ class CanvasClient:
         url = f"{self.base_url}/api/v1/courses/{course_id}/assignments"
         return list(self._paginate(url, params={"bucket": "upcoming", "per_page": 50}))
 
+    def get_submissions(self, course_id: int | str) -> dict[int, str]:
+        """Return {assignment_id: workflow_state} for the current user."""
+        url = f"{self.base_url}/api/v1/courses/{course_id}/students/submissions"
+        try:
+            submissions = {}
+            for s in self._paginate(url, params={"student_ids[]": "self", "per_page": 100}):
+                submissions[s["assignment_id"]] = s.get("workflow_state", "unsubmitted")
+            return submissions
+        except Exception:
+            return {}
+
     def get_all_upcoming_assignments(self) -> list[dict]:
         courses = self.get_active_courses()
         assignments: list[dict] = []
         for course in courses:
             course_name = course.get("course_code") or course.get("name", "Unknown")
+            submissions = self.get_submissions(course["id"])
             for a in self.get_upcoming_assignments(course["id"]):
                 if a.get("due_at"):
                     a["_course_name"] = course_name
+                    a["_submitted"] = submissions.get(a["id"], "unsubmitted") in ("submitted", "graded")
                     assignments.append(a)
         return assignments
 

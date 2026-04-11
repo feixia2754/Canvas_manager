@@ -1,2 +1,15 @@
-token_v3.json
+# Secrets & tokens
 .env
+token_v3.json
+token_v4.json
+credentials.json
+
+# Cache
+.canvas_manager_v3_deadlines.json
+.canvas_manager_v4_deadlines.json
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
