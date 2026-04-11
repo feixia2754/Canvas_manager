@@ -1,12 +1,12 @@
 # Secrets & tokens
 .env
 token_v3.json
-token_v4.json
+token.json
 credentials.json
 
 # Cache
 .canvas_manager_v3_deadlines.json
-.canvas_manager_v4_deadlines.json
+.canvas_manager_deadlines.json
 
 # Python
 __pycache__/

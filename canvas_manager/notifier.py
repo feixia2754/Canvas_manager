@@ -29,7 +29,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
 CREDS_FILE = str(_PROJECT_DIR / "credentials.json")
-TOKEN_FILE = str(_PROJECT_DIR / "token_v4.json")
+TOKEN_FILE = str(_PROJECT_DIR / "token.json")
 
 
 def get_credentials() -> Credentials:
@@ -201,7 +201,7 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
-  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager-v4</p>
+  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager</p>
 </body></html>"""
 
     return subject, html, plain

@@ -1,4 +1,4 @@
-"""CLI entry point for canvas-manager-v4."""
+"""CLI entry point for canvas-manager."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
-from rich.prompt import Prompt
+from rich.prompt import Prompt, Confirm
 
 from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config, get_gcal_config
 from .canvas_client import CanvasClient, parse_due_date
@@ -21,13 +21,239 @@ from .notifier import Notifier, get_credentials
 
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
-DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_v4_deadlines.json"
+DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_deadlines.json"
 
 
 @click.group()
 def cli() -> None:
-    """Canvas Manager V4 — Canvas + Google Calendar → email & SMS reminders."""
+    """Canvas Manager — Canvas + Google Calendar → email & SMS reminders."""
     pass
+
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+@cli.command()
+def setup() -> None:
+    """Interactive setup: configure .env and install the daily cron job."""
+    from shutil import which
+    from .config import CARRIER_GATEWAYS
+
+    env_path = Path(__file__).parent.parent / ".env"
+    console.rule("[bold cyan]Canvas Manager — Setup[/bold cyan]")
+
+    # Load existing values as defaults
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                existing[k.strip()] = v.strip()
+
+    def ask(prompt: str, default: str = "", password: bool = False) -> str:
+        """Prompt and re-prompt until a non-empty value is entered."""
+        while True:
+            value = Prompt.ask(prompt, default=default, password=password).strip()
+            if value:
+                return value
+            console.print("[red]  This field cannot be empty. Please try again.[/red]")
+
+    def ask_validated(prompt: str, validate, default: str = "", password: bool = False) -> str:
+        """Prompt and re-prompt until validate(value) returns True."""
+        while True:
+            value = Prompt.ask(prompt, default=default, password=password).strip()
+            error = validate(value)
+            if error is None:
+                return value
+            console.print(f"[red]  {error}[/red]")
+
+    # --- Validators ---
+    def valid_url(v: str):
+        if not v.startswith("http://") and not v.startswith("https://"):
+            return "Must be a valid URL starting with https://"
+        return None
+
+    def valid_token(v: str):
+        if not v:
+            return "Canvas API token cannot be empty."
+        return None
+
+    def valid_email(v: str):
+        if "@" not in v or "." not in v.split("@")[-1]:
+            return "Enter a valid email address (e.g. you@example.com)."
+        return None
+
+    def valid_phone(v: str):
+        digits = "".join(c for c in v if c.isdigit())
+        if digits.startswith("1") and len(digits) == 11:
+            digits = digits[1:]
+        if len(digits) != 10:
+            return "Enter a valid 10-digit US phone number (e.g. +11234567890)."
+        return None
+
+    def valid_carrier(v: str):
+        if v.lower().strip() not in CARRIER_GATEWAYS:
+            return f"Unknown carrier. Choose from: {', '.join(CARRIER_GATEWAYS.keys())}."
+        return None
+
+    def valid_time(v: str):
+        try:
+            h, m = map(int, v.split(":"))
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+        except (ValueError, AttributeError):
+            return "Enter a valid time in HH:MM format (e.g. 08:00)."
+        return None
+
+    def valid_days(v: str):
+        try:
+            if int(v) < 1:
+                raise ValueError
+        except ValueError:
+            return "Enter a positive whole number (e.g. 3)."
+        return None
+
+    # --- Prompts ---
+    console.print("\n[bold]Canvas[/bold]")
+    while True:
+        canvas_url = ask_validated(
+            "  Canvas base URL",
+            valid_url,
+            default=existing.get("CANVAS_BASE_URL", "https://canvas.cmu.edu"),
+        ).rstrip("/")
+        canvas_token = ask_validated(
+            "  Canvas API token",
+            valid_token,
+            default=existing.get("CANVAS_API_TOKEN", ""),
+            password=True,
+        )
+        # Live validation: test the URL + token against Canvas API
+        console.print("  [dim]Verifying Canvas credentials...[/dim]", end=" ")
+        try:
+            import requests as _requests
+            resp = _requests.get(
+                f"{canvas_url}/api/v1/courses",
+                headers={"Authorization": f"Bearer {canvas_token}"},
+                params={"per_page": 1},
+                timeout=8,
+            )
+            if resp.status_code == 401:
+                console.print("[red]failed[/red]")
+                console.print("[red]  Invalid token. Please re-enter your Canvas API token.[/red]")
+                existing["CANVAS_API_TOKEN"] = ""
+                continue
+            if resp.status_code == 404:
+                console.print("[red]failed[/red]")
+                console.print("[red]  Canvas URL not found. Please check the URL and try again.[/red]")
+                existing["CANVAS_BASE_URL"] = canvas_url
+                continue
+            resp.raise_for_status()
+            console.print("[green]OK[/green]")
+            break
+        except _requests.exceptions.ConnectionError:
+            console.print("[red]failed[/red]")
+            console.print("[red]  Could not reach that URL. Please check the Canvas base URL.[/red]")
+            existing["CANVAS_BASE_URL"] = canvas_url
+
+    console.print("\n[bold]Email[/bold]")
+    to_email = ask_validated(
+        "  Send reminders to (email)",
+        valid_email,
+        default=existing.get("TO_EMAIL_ADDRESS", ""),
+    )
+
+    console.print("\n[bold]SMS[/bold]")
+    phone = ask_validated(
+        "  Your phone number (e.g. +11234567890)",
+        valid_phone,
+        default=existing.get("TO_PHONE_NUMBER", ""),
+    )
+    carrier = ask_validated(
+        f"  Your carrier ({', '.join(CARRIER_GATEWAYS.keys())})",
+        valid_carrier,
+        default=existing.get("PHONE_CARRIER", "tmobile"),
+    ).lower().strip()
+
+    console.print("\n[bold]Google Calendar[/bold]")
+    while True:
+        gcal_id = ask(
+            "  Google Calendar ID",
+            default=existing.get("GCAL_CALENDAR_ID", "primary"),
+        )
+        # Live validation: check calendar ID using existing credentials if available
+        from .notifier import TOKEN_FILE, CREDS_FILE
+        if os.path.exists(TOKEN_FILE) and os.path.exists(CREDS_FILE):
+            console.print("  [dim]Verifying Google Calendar ID...[/dim]", end=" ")
+            try:
+                creds = get_credentials()
+                gcal = GCalClient(creds)
+                gcal.service.calendarList().get(calendarId=gcal_id).execute()
+                console.print("[green]OK[/green]")
+                break
+            except Exception as e:
+                console.print("[red]failed[/red]")
+                console.print(f"[red]  Calendar ID not found or not accessible. Please check and try again.[/red]")
+                existing["GCAL_CALENDAR_ID"] = gcal_id
+        else:
+            console.print("  [dim](Google credentials not set up yet — calendar ID will be verified on first sync)[/dim]")
+            break
+
+    console.print("\n[bold]Reminder settings[/bold]")
+    reminder_time = ask_validated(
+        "  Daily reminder time (HH:MM, 24h)",
+        valid_time,
+        default=existing.get("REMINDER_TIME", "08:00"),
+    )
+    lookahead = ask_validated(
+        "  Days ahead to include in reminders",
+        valid_days,
+        default=existing.get("REMINDER_LOOKAHEAD_DAYS", "3"),
+    )
+
+    hour, minute = map(int, reminder_time.split(":"))
+
+    # Write .env
+    env_content = f"""CANVAS_BASE_URL={canvas_url}
+CANVAS_API_TOKEN={canvas_token}
+
+TO_EMAIL_ADDRESS={to_email}
+FROM_NAME=Canvas Manager
+
+TO_PHONE_NUMBER={phone}
+PHONE_CARRIER={carrier}
+
+REMINDER_LOOKAHEAD_DAYS={lookahead}
+REMINDER_TIME={reminder_time}
+
+GCAL_CALENDAR_ID={gcal_id}
+GCAL_DAYS_AHEAD=30
+"""
+    env_path.write_text(env_content)
+    console.print(f"\n[green]✓[/green] Saved config to [dim]{env_path}[/dim]")
+
+    # Update crontab
+    if Confirm.ask("\n  Install daily cron job?", default=True):
+        import subprocess
+        bin_path = which("canvas-manager") or "canvas-manager"
+        log = Path.home() / ".canvas_manager.log"
+        cron_line = f"{minute} {hour} * * * {bin_path} sync && {bin_path} remind >> {log} 2>&1"
+
+        # Remove any existing canvas-manager daily entry and add the new one
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        existing_cron = result.stdout if result.returncode == 0 else ""
+        new_cron = "\n".join(
+            line for line in existing_cron.splitlines()
+            if "canvas-manager" not in line or line.strip().endswith("10 4 *")
+        )
+        new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
+        subprocess.run(["crontab", "-"], input=new_cron, text=True)
+        console.print(f"[green]✓[/green] Cron job set for [bold]{reminder_time}[/bold] daily")
+
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("  1. Run [cyan]canvas-manager sync[/cyan] to fetch your first deadlines")
+    console.print("  2. Run [cyan]canvas-manager remind --preview[/cyan] to preview your reminder")
+    console.print("  3. Run [cyan]canvas-manager remind[/cyan] to send it now\n")
 
 
 # ---------------------------------------------------------------------------
@@ -43,8 +269,8 @@ def import_ical(ical_file: str | None) -> None:
 
     \b
     Example:
-      canvas-manager-v4 import-ical ~/Downloads/calendar.ics
-      canvas-manager-v4 import-ical
+      canvas-manager import-ical ~/Downloads/calendar.ics
+      canvas-manager import-ical
     """
     if not ical_file:
         ical_file = Prompt.ask("Path to your .ics file").strip().strip("'\"")
@@ -70,7 +296,7 @@ def import_ical(ical_file: str | None) -> None:
 
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
-    console.print(f"\n[dim]Saved. Run [bold]canvas-manager-v4 remind[/bold] to send notifications.[/dim]")
+    console.print(f"\n[dim]Saved. Run [bold]canvas-manager remind[/bold] to send notifications.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +405,11 @@ def remind(
 
     \b
     Examples:
-      canvas-manager-v4 remind
-      canvas-manager-v4 remind --preview
-      canvas-manager-v4 remind --email-only
-      canvas-manager-v4 remind --sms-only
-      canvas-manager-v4 remind --days 5
+      canvas-manager remind
+      canvas-manager remind --preview
+      canvas-manager remind --email-only
+      canvas-manager remind --sms-only
+      canvas-manager remind --days 5
     """
     reminder_cfg = get_reminder_config()
     lookahead = days if days is not None else reminder_cfg["lookahead_days"]
@@ -258,8 +484,8 @@ def setup_cron(reminder_time: str | None) -> None:
         console.print(f"[red]Invalid time: {t}. Use HH:MM.[/red]")
         sys.exit(1)
 
-    cmd = which("canvas-manager-v4") or "canvas-manager-v4"
-    log = Path.home() / ".canvas_manager_v4.log"
+    cmd = which("canvas-manager") or "canvas-manager"
+    log = Path.home() / ".canvas_manager.log"
     cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} remind >> {log} 2>&1"
 
     console.print("[bold]Add this to your crontab ([bold]crontab -e[/bold]):[/bold]\n")
