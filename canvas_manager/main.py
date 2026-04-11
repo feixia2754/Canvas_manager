@@ -525,7 +525,7 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
             in_str = f"[yellow]{days_left}d[/yellow]"
         else:
             in_str = f"{days_left}d"
-        submitted = "[green]✓ submitted[/green]" if d.get("submitted") else ""
+        submitted = "[green]✓ submitted[/green]" if d.get("submitted") else ("[red]✗ not submitted[/red]" if d.get("source") == "canvas" else "")
         table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), submitted)
 
     console.print(table)
