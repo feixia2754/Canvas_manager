@@ -845,6 +845,8 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool) -> None:
         if result["existing_blocks"] and not result["skipped"]:
             console.print(f"[green]All assignments for {d} are already scheduled.[/green]"
                           " Use [bold]--overwrite[/bold] to regenerate.")
+        elif not result["existing_blocks"] and not result["skipped"]:
+            console.print("[green]No more work today![/green]")
         else:
             console.print("[yellow]No study blocks could be placed.[/yellow]")
     else:
