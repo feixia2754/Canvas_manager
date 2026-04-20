@@ -132,3 +132,6 @@ jobs:
 
       - name: pytest test_habits.py
         run: python -m pytest test_habits.py -v
+
+      - name: pytest tests/test_schedule.py
+        run: python -m pytest tests/test_schedule.py -v
