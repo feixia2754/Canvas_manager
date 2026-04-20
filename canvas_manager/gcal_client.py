@@ -48,6 +48,8 @@ class GCalClient:
                 "course": _extract_course(summary, description),
                 "url": event.get("htmlLink", ""),
                 "source": "gcal",
+                "submitted": False,
+                "recurrence": bool(event.get("recurringEventId")),
             })
 
         deadlines.sort(key=lambda d: d["due_at"])

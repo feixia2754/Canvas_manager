@@ -25,6 +25,7 @@ DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_deadlines.json
 
 
 @click.group()
+@click.version_option(package_name="canvas-manager")
 def cli() -> None:
     """Canvas Manager — Canvas + Google Calendar → email & SMS reminders."""
     pass
@@ -294,6 +295,9 @@ def import_ical(ical_file: str | None) -> None:
     merged = merge_with_canvas(ical_deadlines, canvas_assignments)
     console.print(f"  Merged total: [bold]{len(merged)}[/bold] unique deadline(s).\n")
 
+    for d in merged:
+        d["type"] = _classify(d)
+        d.pop("recurrence", None)
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
     console.print(f"\n[dim]Saved. Run [bold]canvas-manager remind[/bold] to send notifications.[/dim]")
@@ -324,6 +328,7 @@ def sync(skip_gcal: bool) -> None:
             "url": a.get("html_url", ""),
             "source": "canvas",
             "submitted": a.get("_submitted", False),
+            "recurrence": False,
         })
 
     # --- Google Calendar ---
@@ -355,6 +360,9 @@ def sync(skip_gcal: bool) -> None:
             console.print(f"[yellow]skipped (error: {e})[/yellow]")
 
     deadlines.sort(key=lambda d: d["due_at"])
+    for d in deadlines:
+        d["type"] = _classify(d)
+        d.pop("recurrence", None)
     _print_table(deadlines, title="Upcoming Deadlines (Canvas + Google Calendar)")
     _save_cache(deadlines)
     console.print(f"\n[dim]Saved {len(deadlines)} deadline(s).[/dim]")
@@ -378,7 +386,16 @@ def list_deadlines(days: int) -> None:
         [d for d in deadlines if now <= d["due_at"] <= cutoff],
         key=lambda d: d["due_at"],
     )
-    _print_table(upcoming, title=f"Deadlines in the next {days} days")
+    assignments = [d for d in upcoming if d.get("type") == "assignment"]
+    events = [d for d in upcoming if d.get("type") != "assignment"]
+    if assignments:
+        _print_table(assignments, title=f"Assignments — next {days} days")
+    else:
+        console.print(f"[dim]No assignments in the next {days} days.[/dim]")
+    if events:
+        _print_table(events, title=f"Classes & Events — next {days} days")
+    else:
+        console.print(f"[dim]No classes or other events in the next {days} days.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +511,30 @@ def setup_cron(reminder_time: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# clear-cache
+# ---------------------------------------------------------------------------
+
+@cli.command("clear-cache")
+def clear_cache() -> None:
+    """Delete the local deadlines cache."""
+    if not DEADLINES_CACHE.exists():
+        console.print("[yellow]No cache file found — nothing to delete.[/yellow]")
+        return
+    DEADLINES_CACHE.unlink()
+    console.print(f"[green]✓[/green] Cache deleted. Run [cyan]canvas-manager sync[/cyan] to rebuild.")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _classify(d: dict) -> str:
+    if d["source"] == "canvas":
+        return "assignment"
+    if d.get("recurrence"):
+        return "class"
+    return "other"
+
 
 def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
     table = Table(title=title, show_lines=True)
@@ -505,6 +544,7 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
     table.add_column("Due", style="yellow")
     table.add_column("In", justify="right")
     table.add_column("Source", style="dim")
+    table.add_column("Type")
     table.add_column("Status", style="green")
 
     now = datetime.now(tz=timezone.utc)
@@ -526,7 +566,9 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
         else:
             in_str = f"{days_left}d"
         submitted = "[green]✓ submitted[/green]" if d.get("submitted") else ("[red]✗ not submitted[/red]" if d.get("source") == "canvas" else "")
-        table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), submitted)
+        dtype = d.get("type", "")
+        type_str = {"class": "[blue]class[/blue]", "assignment": "[magenta]assignment[/magenta]"}.get(dtype, "[dim]other[/dim]")
+        table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), type_str, submitted)
 
     console.print(table)
 

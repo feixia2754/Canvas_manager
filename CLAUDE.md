@@ -35,8 +35,11 @@ Every source (Canvas, GCal, iCal) normalizes to this exact shape before any proc
     "url":       str,       # canonical link
     "source":    str,       # "canvas" | "gcal" | "ical"
     "submitted": bool,      # always present; False for non-Canvas sources
+    "type":      str,       # "assignment" | "class" | "other" — set by _classify() in main.py
 }
 ```
+
+The transient `"recurrence": bool` key is added by each source client/parser and consumed by `_classify()`; it is popped before caching and display.
 
 Never add ad-hoc keys to this dict without updating every consumer.
 

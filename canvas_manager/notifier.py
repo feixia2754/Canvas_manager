@@ -140,6 +140,9 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         html = f"<p>{plain}</p>"
         return subject, html, plain
 
+    assignments = [d for d in upcoming if d.get("type") == "assignment"]
+    events = [d for d in upcoming if d.get("type") != "assignment"]
+
     due_today = [d for d in upcoming if (d["due_at"].astimezone().date() - now.astimezone().date()).days == 0]
     subject = (
         f"⚠️ Canvas — {len(due_today)} due TODAY ({today_str})"
@@ -147,24 +150,50 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         f"📚 Canvas — {len(upcoming)} upcoming deadline(s) ({today_str})"
     )
 
-    # Plain text
     plain_lines = [f"Canvas Reminder — {today_str}", "=" * 40, ""]
-    for item in upcoming:
+    if assignments:
+        plain_lines += ["ASSIGNMENTS", "-" * 11, ""]
+        plain_lines += _plain_rows(assignments, now)
+    if events:
+        plain_lines += ["CLASSES & EVENTS", "-" * 16, ""]
+        plain_lines += _plain_rows(events, now)
+    plain = "\n".join(plain_lines)
+
+    sections_html = ""
+    if assignments:
+        sections_html += _html_section("Assignments", assignments, now)
+    if events:
+        sections_html += _html_section("Classes &amp; Events", events, now)
+
+    html = f"""<!DOCTYPE html>
+<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;color:#333;">
+  <h2 style="color:#1a73e8;">📚 Canvas Reminder</h2>
+  <p style="color:#555;">{today_str}</p>
+  {sections_html}
+  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager</p>
+</body></html>"""
+
+    return subject, html, plain
+
+
+def _plain_rows(items: list[dict], now: datetime) -> list[str]:
+    lines: list[str] = []
+    for item in items:
         local_due = item["due_at"].astimezone()
         days_left = (local_due.date() - now.astimezone().date()).days
         due_str = local_due.strftime("%a %b %d at %I:%M %p")
         urgency = "DUE TODAY" if days_left == 0 else ("Due tomorrow" if days_left == 1 else f"Due in {days_left}d")
         submitted_str = " ✓ submitted" if item.get("submitted") else ""
-        plain_lines += [f"[{urgency}]{submitted_str} {item.get('course', '')} — {item['name']}", f"  Due: {due_str}", ""]
-    plain = "\n".join(plain_lines)
+        lines += [f"[{urgency}]{submitted_str} {item.get('course', '')} — {item['name']}", f"  Due: {due_str}", ""]
+    return lines
 
-    # HTML
+
+def _html_section(label: str, items: list[dict], now: datetime) -> str:
     rows = ""
-    for item in upcoming:
+    for item in items:
         local_due = item["due_at"].astimezone()
         days_left = (local_due.date() - now.astimezone().date()).days
         due_str = local_due.strftime("%a %b %d at %I:%M %p")
-
         if days_left == 0:
             urgency_html = '<span style="color:#cc0000;font-weight:bold;">DUE TODAY</span>'
             row_bg = "#fff3f3"
@@ -174,12 +203,10 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         else:
             urgency_html = f'<span style="color:#555;">In {days_left}d</span>'
             row_bg = "#ffffff"
-
         url = item.get("url", "")
         name = item["name"]
         name_html = f'<a href="{url}" style="color:#1a73e8;">{name}</a>' if url else name
         submitted_html = ' <span style="color:#2e7d32;font-weight:bold;">✓ submitted</span>' if item.get("submitted") else ""
-
         rows += f"""
         <tr style="background:{row_bg};">
           <td style="padding:10px 12px;border-bottom:1px solid #eee;">{urgency_html}</td>
@@ -187,45 +214,45 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
           <td style="padding:10px 12px;border-bottom:1px solid #eee;">{name_html}{submitted_html}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #eee;color:#555;">{due_str}</td>
         </tr>"""
-
-    html = f"""<!DOCTYPE html>
-<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;color:#333;">
-  <h2 style="color:#1a73e8;">📚 Canvas Reminder</h2>
-  <p style="color:#555;">{today_str}</p>
-  <table style="width:100%;border-collapse:collapse;margin-top:16px;">
+    return f"""
+  <h3 style="color:#333;margin-top:24px;">{label}</h3>
+  <table style="width:100%;border-collapse:collapse;">
     <thead><tr style="background:#f1f3f4;">
       <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #ddd;">Status</th>
       <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #ddd;">Course</th>
-      <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #ddd;">Assignment</th>
+      <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #ddd;">Item</th>
       <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #ddd;">Due</th>
     </tr></thead>
     <tbody>{rows}</tbody>
-  </table>
-  <p style="margin-top:24px;font-size:12px;color:#aaa;">Sent by canvas-manager</p>
-</body></html>"""
-
-    return subject, html, plain
+  </table>"""
 
 
 def _build_sms(deadlines: list[dict], lookahead_days: int) -> str:
-    """Build a short plain-text SMS body (target: under 320 chars)."""
+    """Summary SMS — counts + today's urgent items only; full details go to email."""
     now = datetime.now(tz=timezone.utc)
     cutoff = now + timedelta(days=lookahead_days)
+    today = now.astimezone().date()
     upcoming = [d for d in deadlines if now <= d["due_at"] <= cutoff]
 
     if not upcoming:
-        return f"Canvas: No deadlines in {lookahead_days}d. All caught up!"
+        return f"Canvas: nothing due in {lookahead_days}d. Check email for details."
+
+    assignments = [d for d in upcoming if d.get("type") == "assignment"]
+    events = [d for d in upcoming if d.get("type") != "assignment"]
+    due_today = [d for d in upcoming if d["due_at"].astimezone().date() == today]
+
+    parts = []
+    if assignments:
+        parts.append(f"{len(assignments)} assignment{'s' if len(assignments) != 1 else ''}")
+    if events:
+        parts.append(f"{len(events)} class/event{'s' if len(events) != 1 else ''}")
 
     today_str = now.astimezone().strftime("%m/%d")
-    lines = [f"Canvas ({today_str}):"]
-    for item in upcoming:
-        local_due = item["due_at"].astimezone()
-        days_left = (local_due.date() - now.astimezone().date()).days
-        urgency = "TODAY" if days_left == 0 else ("tmrw" if days_left == 1 else f"{days_left}d")
-        course = item.get("course", "")[:8]
-        name = item["name"][:22] + ("..." if len(item["name"]) > 22 else "")
-        due_str = local_due.strftime("%m/%d %I%p").lower()
-        lines.append(f"[{urgency}] {course}: {name} ({due_str})")
+    lines = [f"Canvas ({today_str}): {', '.join(parts)}."]
 
-    body = "\n".join(lines)
-    return body[:320] + "..." if len(body) > 320 else body
+    if due_today:
+        names = ", ".join(d["name"][:20] + ("…" if len(d["name"]) > 20 else "") for d in due_today)
+        lines.append(f"Due TODAY: {names}.")
+
+    lines.append("Check email for details.")
+    return "\n".join(lines)

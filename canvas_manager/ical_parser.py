@@ -35,6 +35,8 @@ def parse_ical(path: str | Path) -> list[dict]:
             "course": _extract_course(summary, description),
             "url": url,
             "source": "ical",
+            "submitted": False,
+            "recurrence": bool(component.get("RRULE")),
         })
 
     deadlines.sort(key=lambda d: d["due_at"])
@@ -78,6 +80,8 @@ def merge_with_canvas(ical_deadlines: list[dict], canvas_assignments: list[dict]
             "course": a.get("_course_name", "Unknown"),
             "url": a.get("html_url", ""),
             "source": "canvas",
+            "submitted": a.get("_submitted", False),
+            "recurrence": False,
         })
 
     merged = list(canvas_items)
