@@ -75,14 +75,14 @@ def test_add_creates_block_and_prints_confirmation(runner: CliRunner):
     assert "10:00" in result.output
 
 
-def test_add_conflict_exits_nonzero(runner: CliRunner):
+def test_add_overlap_allowed(runner: CliRunner):
     _add(runner, "First", "09:00", "11:00")
     result = runner.invoke(cli, [
         "schedule", "add", "Overlap",
         "--from", "10:00", "--to", "12:00", "--date", TODAY_STR,
     ])
-    assert result.exit_code != 0
-    assert "overlap" in result.output.lower()
+    assert result.exit_code == 0
+    assert len(schedule.load_plan(TODAY)) == 2
 
 
 # ---------------------------------------------------------------------------

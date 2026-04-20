@@ -708,35 +708,17 @@ def schedule_list(plan_date: datetime | None) -> None:
 def schedule_add(title: str, start: str, end: str, block_type: str,
                  plan_date: datetime | None) -> None:
     """Add a new block to a day's schedule."""
+    from .schedule import _generate_id
     d = plan_date.date() if plan_date else date.today()
-    try:
-        block = _sched.add_block(d, {
-            "id": "", "start": start, "end": end,
-            "title": title, "type": block_type, "source": "manual",
-        })
-        console.print(f"[green]✓[/green] Added block {block['id']} "
-                      f"({block['start']}–{block['end']} {block['title']}).")
-    except ValueError:
-        # If every conflicting block is AI-placed, stack the new block alongside them
-        new_start = _hhmm_to_minutes(start)
-        new_end   = _hhmm_to_minutes(end)
-        existing  = _sched.load_plan(d)
-        conflicts = [b for b in existing
-                     if _hhmm_to_minutes(b["start"]) < new_end
-                     and _hhmm_to_minutes(b["end"]) > new_start]
-        if any(b["source"] != "ai" for b in conflicts):
-            console.print(f"[red]Error: overlaps a manually-added block — "
-                          f"move or delete it first.[/red]")
-            sys.exit(1)
-        from .schedule import _generate_id
-        new_block: _sched.Block = {
-            "id": _generate_id(), "start": start, "end": end,
-            "title": title, "type": block_type, "source": "manual",
-        }
-        existing.append(new_block)
-        _sched.save_plan(d, existing)
-        console.print(f"[green]✓[/green] Added block {new_block['id']} "
-                      f"({new_block['start']}–{new_block['end']} {new_block['title']}).")
+    block: _sched.Block = {
+        "id": _generate_id(), "start": start, "end": end,
+        "title": title, "type": block_type, "source": "manual",
+    }
+    existing = _sched.load_plan(d)
+    existing.append(block)
+    _sched.save_plan(d, existing)
+    console.print(f"[green]✓[/green] Added block {block['id']} "
+                  f"({block['start']}–{block['end']} {block['title']}).")
 
 
 @schedule.command("move")
