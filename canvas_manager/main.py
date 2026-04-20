@@ -641,7 +641,7 @@ def habits() -> None:
         "hard_stops":             _parse_hard_stops(
                                       ask_range_list(
                                           "  Hard-stop ranges (e.g. 12:00-13:00, 18:00-19:00) — or 'none'",
-                                          existing_stops_str if existing_stops_str != "none" else "",
+                                          existing_stops_str,
                                       )
                                   ),
     }
