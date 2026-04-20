@@ -13,6 +13,10 @@ Automatically fetches your Canvas assignments and Google Calendar events, then s
 - Shows `✓ submitted` indicator for already-submitted Canvas assignments
 - Daily cron job syncs and sends reminders automatically every morning
 - Interactive `setup` command — no manual file editing required
+- `habits` command — saves your wake/sleep times, focus block length, and hard-stop ranges
+- `plan` command — auto-generates a study schedule for the day based on your habits and deadlines
+- `schedule` subcommands — manually add, move, update, delete, or clear blocks on any day
+- Export any day's schedule to a `.ics` file with `plan --export`
 
 ---
 
@@ -190,6 +194,92 @@ canvas-manager remind --days 5
 
 # Send to a different email address
 canvas-manager remind --to-email someone@example.com
+
+# Append today's schedule to the email
+canvas-manager remind --schedule
+
+# Append a specific day's schedule
+canvas-manager remind --schedule --schedule-date 2026-05-01
+```
+
+---
+
+### `habits`
+Set up your daily schedule preferences. Saved to `~/.canvas_manager/habits.json` and used by `plan`.
+
+```bash
+canvas-manager habits
+```
+
+Prompts for:
+- Wake and sleep times
+- Peak focus hours (e.g. `09:00-11:00, 14:00-16:00`)
+- Preferred focus block length (minutes)
+- Break length between blocks (minutes)
+- Hard-stop ranges (e.g. lunch, commute — blocks are never placed here)
+
+---
+
+### `plan`
+Generate and view the study plan for a day. Reads your habits and the deadlines cache.
+
+```bash
+# Plan today
+canvas-manager plan
+
+# Plan a specific date
+canvas-manager plan --date 2026-05-01
+
+# Clear existing auto-generated blocks and replan from scratch
+canvas-manager plan --overwrite
+
+# Export the day's schedule to a .ics file
+canvas-manager plan --export
+
+# Export to a specific path
+canvas-manager plan --export --out ~/Desktop/today.ics
+```
+
+**How it works:**
+1. Places GCal timed events (classes, meetings) at their exact time slots.
+2. Places study blocks for Canvas assignments due that day in remaining free time, sorted by urgency.
+3. Respects hard-stop ranges and never schedules blocks in the past (when planning today).
+
+---
+
+### `schedule`
+Manually adjust blocks on any day. These changes persist alongside auto-generated blocks.
+
+```bash
+# Add a block (overlapping blocks are allowed)
+canvas-manager schedule add "Office Hours" --from 14:00 --to 15:00 --type other
+canvas-manager schedule add "Study: 18-665" --from 10:00 --to 11:30 --type study --date 2026-05-01
+
+# Move a block (provide one or both bounds; duration is preserved when only one is given)
+canvas-manager schedule move blk_a1b2c3d4 --from 11:00
+canvas-manager schedule move blk_a1b2c3d4 --from 11:00 --to 12:30
+
+# Update a block's title or type
+canvas-manager schedule update blk_a1b2c3d4 --title "Revised title"
+canvas-manager schedule update blk_a1b2c3d4 --type break
+
+# Delete a single block
+canvas-manager schedule delete blk_a1b2c3d4
+
+# Clear all blocks for a day
+canvas-manager schedule clear
+canvas-manager schedule clear --date 2026-05-01 --yes
+```
+
+Block types: `class`, `assignment`, `study`, `break`, `personal`, `other`.
+
+---
+
+### `clear-cache`
+Delete the local deadlines cache (`.canvas_manager_deadlines.json`). Run `sync` to rebuild.
+
+```bash
+canvas-manager clear-cache
 ```
 
 ---
@@ -265,6 +355,8 @@ By default the app uses your primary Google Calendar. To use a different calenda
 | `credentials.json` | Google OAuth credentials from Cloud Console — **never commit this** |
 | `token.json` | Auto-generated Google access token — **never commit this** |
 | `.canvas_manager_deadlines.json` | Local cache of deadlines — safe to gitignore |
+| `~/.canvas_manager/habits.json` | Your habits profile (wake/sleep, focus blocks, hard-stops) |
+| `~/.canvas_manager/plans/YYYY-MM-DD.json` | Per-day schedule blocks |
 
 ---
 

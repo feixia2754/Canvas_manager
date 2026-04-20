@@ -14,12 +14,15 @@ Run: `canvas-manager <command>`
 
 ```
 canvas_manager/
-  main.py          — Click CLI; commands: setup, sync, list, remind, import-ical, setup-cron
+  main.py          — Click CLI; commands: setup, sync, list, remind, import-ical, setup-cron,
+                     clear-cache, habits, plan, schedule (subgroup: add/move/update/delete/clear)
   config.py        — All env-var reads; single source of truth for configuration
   canvas_client.py — Canvas REST API (requests); returns normalized deadline dicts
   gcal_client.py   — Google Calendar API; returns normalized deadline dicts
   notifier.py      — Gmail API; HTML+plain email, SMS via carrier gateway
   ical_parser.py   — .ics file parsing and fuzzy merge with Canvas deadlines
+  schedule.py      — Block TypedDict, per-day JSON storage CRUD (~/.canvas_manager/plans/)
+  scheduler.py     — Rule-based plan generator; reads habits + deadlines cache
   ai/              — RESERVED — see section below
 ```
 
@@ -35,7 +38,7 @@ Every source (Canvas, GCal, iCal) normalizes to this exact shape before any proc
     "url":       str,       # canonical link
     "source":    str,       # "canvas" | "gcal" | "ical"
     "submitted": bool,      # always present; False for non-Canvas sources
-    "type":      str,       # "assignment" | "class" | "other" — set by _classify() in main.py
+    "type":      str,       # "assignment" | "class" | "study" | "personal" | "other" — set by _classify() in main.py
 }
 ```
 
@@ -54,6 +57,8 @@ Never add ad-hoc keys to this dict without updating every consumer.
 | `gcal_client.py` | Google Calendar calls, OAuth token | Config reads, display |
 | `notifier.py` | Gmail send, SMS gateway routing | Fetching deadlines |
 | `ical_parser.py` | iCal parsing, fuzzy dedup | Network calls |
+| `schedule.py` | Block TypedDict, per-day storage (load/save/add/update/delete) | Network, config |
+| `scheduler.py` | `generate_plan()`; reads habits + deadlines cache; no side effects | Network, display |
 | `main.py` | CLI UX, cache read/write, orchestration | Business logic |
 
 ---
@@ -103,6 +108,54 @@ Never add ad-hoc keys to this dict without updating every consumer.
 - **Never** use `print()` in library modules; use Python `logging` or surface errors via exceptions.
 - **Never** hardcode any URL, token, or credential — always route through `config.py`.
 - **Always** keep `submitted` field present on every deadline dict, even for non-Canvas sources (default `False`).
+
+---
+
+## Schedule / Plan / Habits subsystem
+
+### Block (schedule data structure)
+
+```python
+# canvas_manager/schedule.py
+{
+    "id":     str,   # "blk_" + 8 random hex chars
+    "start":  str,   # "HH:MM" 24-hour
+    "end":    str,   # "HH:MM" 24-hour
+    "title":  str,
+    "type":   Literal["class", "assignment", "study", "break", "personal", "other"],
+    "source": Literal["canvas", "gcal", "manual", ""],
+}
+```
+
+### Storage
+- Schedule blocks: `~/.canvas_manager/plans/YYYY-MM-DD.json` — one file per day, sorted by `start`.
+- Habits profile: `~/.canvas_manager/habits.json`
+
+### Commands
+| Command | Description |
+|---|---|
+| `habits` | Interactive setup for wake/sleep times, focus blocks, hard-stop ranges |
+| `plan [--date] [--overwrite] [--export] [--out]` | Generate and view the day's study plan |
+| `schedule add TITLE --from --to [--type] [--date]` | Add a block (overlaps allowed in CLI) |
+| `schedule move BLOCK_ID [--from] [--to] [--date]` | Shift a block; preserves duration |
+| `schedule update BLOCK_ID [--title] [--type] [--date]` | Edit block fields |
+| `schedule delete BLOCK_ID [--yes] [--date]` | Remove a block |
+| `schedule clear [--yes] [--date]` | Delete all blocks for a day |
+| `clear-cache` | Delete the local deadlines cache |
+
+### Overlap policy
+- **`schedule add` (CLI)**: overlaps are **allowed** — blocks are stacked and displayed side-by-side.
+- **`schedule.add_block()` (library)**: raises `ValueError` on overlap — used by `generate_plan()`.
+- Overlapping groups rendered via `_group_overlapping()` in `main.py`.
+
+### plan --export
+Writes schedule blocks to a `.ics` file via the `icalendar` package (default: `schedule-YYYY-MM-DD.ics` in cwd). Does **not** push to GCal.
+
+### generate_plan() (scheduler.py)
+- Pass 1: places GCal timed events (`source="gcal"`, has `start_at`) at their exact slots.
+- Pass 2: places Canvas/iCal assignment blocks after the last class ends, sorted by urgency (soonest `due_at` first).
+- Respects habits: `wake_time`, `sleep_time`, `preferred_block_minutes`, `break_minutes`, `hard_stops`.
+- Falls back to `DEFAULT_HABITS` if `~/.canvas_manager/habits.json` is absent.
 
 ---
 
