@@ -225,21 +225,23 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
 
     deadlines = _load_deadlines()
 
-    # Timed events on target_date — skip any whose end time has already passed
+    # Pass 1 candidates: GCal events with a known start time on target_date
     events_today = sorted(
         [
             d for d in deadlines
-            if d.get("start_at") and not d.get("submitted")
+            if d.get("source") == "gcal"
+            and d.get("start_at") and not d.get("submitted")
             and _on_target_date(d, target_date, use_start=True)
         ],
         key=lambda d: d["start_at"],
     )
 
-    # Assignments due on target_date (submitted ones already excluded)
+    # Pass 2 candidates: Canvas/iCal assignments due on target_date (never GCal)
     assignments_today = sorted(
         [
             d for d in deadlines
-            if not d.get("start_at") and not d.get("submitted")
+            if d.get("source") != "gcal"
+            and not d.get("submitted")
             and _on_target_date(d, target_date, use_start=False)
         ],
         key=lambda d: _urgency_score(d, target_date),
@@ -248,14 +250,19 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     placed: list[Block] = []
     skipped: list[str] = []
 
-    # Names already covered by existing study blocks (avoid double-booking)
+    # Titles of assignments already slotted — avoid double-booking on re-runs
+    # Also match legacy "Study: X" titles from old runs
     already_covered: set[str] = {
+        b["title"]
+        for b in existing
+        if b["type"] == "assignment"
+    } | {
         b["title"].removeprefix("Study: ")
         for b in existing
-        if b["source"] == "ai" and b["type"] == "study"
+        if b["source"] in ("", "planner", "auto", "ai") and b["type"] == "study"
     }
 
-    # --- Pass 1: place timed events at their exact slots ---
+    # --- Pass 1: place timed GCal events at their exact slots ---
     for dl in events_today:
         local_start = dl["start_at"].astimezone()
         local_end = dl["due_at"].astimezone()
@@ -264,25 +271,22 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         if start_mins >= end_mins:
             skipped.append(dl["name"])
             continue
-        # Skip classes that have already ended today
-        if is_today and end_mins <= now_mins:
-            continue
         try:
             block = _sched.add_block(target_date, {
                 "id": "",
                 "start": _format_hhmm(start_mins),
                 "end": _format_hhmm(end_mins),
                 "title": dl["name"][:40],
-                "type": dl.get("type", "other"),
+                "type": "class",
                 "source": "gcal",
             })
             placed.append(block)
         except ValueError:
             skipped.append(dl["name"])
 
-    # --- Pass 2: assignment study blocks after last timed event ---
+    # --- Pass 2: slot Canvas assignments after the last class ends ---
     all_blocks = _sched.list_blocks(target_date)
-    timed_blocks = [b for b in all_blocks if b["type"] in ("class", "other")]
+    timed_blocks = [b for b in all_blocks if b["type"] == "class"]
     last_event_end = (
         max(_parse_hhmm(b["end"]) for b in timed_blocks)
         if timed_blocks else wake
@@ -300,7 +304,8 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     free = _free_slots(free_start, sleep, occupied)
 
     for dl in assignments_today:
-        if dl["name"][:40] in already_covered:
+        name = dl["name"][:40]
+        if name in already_covered:
             continue
         placed_this = False
         new_free: list[tuple[int, int]] = []
@@ -310,9 +315,9 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
                     "id": "",
                     "start": _format_hhmm(s),
                     "end": _format_hhmm(s + preferred),
-                    "title": f"Study: {dl['name'][:40]}",
-                    "type": "study",
-                    "source": "ai",
+                    "title": name,
+                    "type": dl.get("type", "assignment"),
+                    "source": dl.get("source", "canvas"),
                 })
                 placed.append(block)
                 placed_this = True

@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 import canvas_manager.schedule as schedule
+import canvas_manager.scheduler as scheduler
 from canvas_manager.main import cli
 
 TODAY = date(2026, 4, 20)
@@ -20,6 +21,8 @@ TODAY_STR = "2026-04-20"
 def isolated_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / "plans"
     monkeypatch.setattr(schedule, "PLANS_DIR", d)
+    monkeypatch.setattr(scheduler, "HABITS_FILE", tmp_path / "habits.json")
+    monkeypatch.setattr(scheduler, "DEADLINES_CACHE", tmp_path / "deadlines.json")
     return d
 
 
@@ -43,19 +46,19 @@ def _add(runner: CliRunner, title: str, start: str, end: str,
 
 
 # ---------------------------------------------------------------------------
-# list
+# plan (view + generate)
 # ---------------------------------------------------------------------------
 
-def test_list_empty_shows_message(runner: CliRunner):
-    result = runner.invoke(cli, ["schedule", "list", "--date", TODAY_STR])
+def test_plan_empty_shows_message(runner: CliRunner):
+    result = runner.invoke(cli, ["plan", "--date", TODAY_STR])
     assert result.exit_code == 0
-    assert "No blocks scheduled" in result.output
+    assert "No blocks scheduled" in result.output or "No more work today" in result.output
 
 
-def test_list_shows_blocks_sorted_by_start(runner: CliRunner):
+def test_plan_shows_blocks_sorted_by_start(runner: CliRunner):
     _add(runner, "Afternoon", "14:00", "15:00")
     _add(runner, "Morning",   "09:00", "10:00")
-    result = runner.invoke(cli, ["schedule", "list", "--date", TODAY_STR])
+    result = runner.invoke(cli, ["plan", "--date", TODAY_STR])
     assert result.exit_code == 0
     assert result.output.index("Morning") < result.output.index("Afternoon")
 

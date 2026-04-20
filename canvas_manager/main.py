@@ -407,14 +407,19 @@ def list_deadlines(days: int) -> None:
 
 @cli.command()
 @click.option("--days", default=None, type=int, help="Override lookahead days.")
-@click.option("--email-only", "email_only", is_flag=True, default=False, help="Send email only.")
-@click.option("--sms-only", "sms_only", is_flag=True, default=False, help="Send SMS only.")
-@click.option("--preview", is_flag=True, default=False, help="Print messages without sending.")
-@click.option("--to-email", "to_email", default=None, help="Override recipient email address.")
+@click.option("--email-only", "email_only", is_flag=True, default=False,
+              help="Send email only (skip SMS). Related: --sms-only, --to-email, --preview.")
+@click.option("--sms-only", "sms_only", is_flag=True, default=False,
+              help="Send SMS only (skip email). Related: --email-only.")
+@click.option("--preview", is_flag=True, default=False,
+              help="Print messages without sending. Related: --email-only, --sms-only.")
+@click.option("--to-email", "to_email", default=None,
+              help="Override recipient email address. Related: --email-only.")
 @click.option("--schedule", "include_schedule", is_flag=True, default=False,
-              help="Append today's schedule to the email.")
+              help="Append the day's schedule to the email. Related: --schedule-date.")
 @click.option("--schedule-date", "schedule_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to include in schedule section (default: today).")
+              default=None,
+              help="Which day's schedule to include (default: today). Requires --schedule.")
 def remind(
     days: int | None,
     email_only: bool,
@@ -688,37 +693,11 @@ def _parse_hard_stops(ranges: list[str]) -> list[dict]:
 
 @cli.group()
 def schedule() -> None:
-    """Manage daily schedule blocks."""
+    """Manually adjust schedule blocks (add, move, update, delete, clear).
+
+    Use 'canvas-manager plan' to view or auto-generate the day's study plan.
+    """
     pass
-
-
-@schedule.command("list")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to list (default: today).")
-def schedule_list(plan_date: datetime | None) -> None:
-    """List scheduled blocks for a day."""
-    d = plan_date.date() if plan_date else date.today()
-    blocks = _sched.list_blocks(d)
-    if not blocks:
-        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
-        return
-    table = Table(title=f"Schedule — {d}", show_lines=True)
-    table.add_column("Start", style="cyan", width=7)
-    table.add_column("End",   style="cyan", width=7)
-    table.add_column("Title", style="bold")
-    table.add_column("Type")
-    table.add_column("Source", style="dim")
-    _TYPE_STYLE = {
-        "class": "[blue]class[/blue]", "assignment": "[magenta]assignment[/magenta]",
-        "study": "[green]study[/green]", "break": "[yellow]break[/yellow]",
-    }
-    for group in _group_overlapping(blocks):
-        for idx, b in enumerate(group):
-            start_cell = b["start"] if idx == 0 else ""
-            end_cell   = b["end"]   if idx == 0 else ""
-            table.add_row(start_cell, end_cell, b["title"][:40],
-                          _TYPE_STYLE.get(b["type"], b["type"]), b["source"])
-    console.print(table)
 
 
 @schedule.command("add")
@@ -726,7 +705,7 @@ def schedule_list(plan_date: datetime | None) -> None:
 @click.option("--from", "start", required=True, metavar="HH:MM", help="Start time.")
 @click.option("--to",   "end",   required=True, metavar="HH:MM", help="End time.")
 @click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "study", "break", "other"]),
+              type=click.Choice(["class", "assignment", "study", "break", "personal", "other"]),
               default="study", show_default=True)
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day to add to (default: today).")
@@ -785,7 +764,7 @@ def schedule_move(block_id: str, start: str | None, end: str | None,
 @click.argument("block_id")
 @click.option("--title", default=None, help="New title.")
 @click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "study", "break", "other"]),
+              type=click.Choice(["class", "assignment", "study", "break", "personal", "other"]),
               default=None, help="New block type.")
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day of the block (default: today).")
@@ -851,54 +830,61 @@ def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
 
 @cli.command("plan")
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to plan (default: today).")
+              default=None, help="Day to plan (default: today). Related: --overwrite, --export.")
 @click.option("--overwrite", is_flag=True, default=False,
-              help="Clear existing AI blocks before planning.")
+              help="Clear existing AI blocks and replan from scratch. Related: --date.")
 @click.option("--export", "export_ical", is_flag=True, default=False,
-              help="Write schedule to a .ics file after planning.")
+              help="Write the plan to a .ics file after generating. Related: --out, --date.")
 @click.option("--out", "out_path", default=None,
-              help="Output path for .ics file (default: schedule-YYYY-MM-DD.ics in cwd).")
+              help="Output path for the .ics file (default: schedule-YYYY-MM-DD.ics). Requires --export.")
 def plan_cmd(plan_date: datetime | None, overwrite: bool,
              export_ical: bool, out_path: str | None) -> None:
-    """Generate a study plan for a day from upcoming deadlines.
+    """View and generate the study plan for a day.
 
-    Use --export to also write a .ics file you can import into any calendar app.
+    Automatically places study blocks for assignments due that day, then
+    displays the full schedule. Use 'schedule add/move/update/delete/clear'
+    to manually adjust blocks afterwards.
+
+    \b
+    Examples:
+      canvas-manager plan
+      canvas-manager plan --date 2026-05-01
+      canvas-manager plan --overwrite
+      canvas-manager plan --export
     """
     d = plan_date.date() if plan_date else date.today()
     result = generate_plan(d, overwrite=overwrite)
+
     habits_note = (
         "[dim]Using custom habits.[/dim]"
         if result["habits_used"] == "custom"
         else "[dim]Using default habits (no ~/.canvas_manager/habits.json found).[/dim]"
     )
     console.print(habits_note)
-    if result["existing_blocks"]:
-        console.print(f"[dim]Kept {result['existing_blocks']} existing block(s).[/dim]")
-    if not result["blocks"]:
-        if result["existing_blocks"] and not result["skipped"]:
-            console.print(f"[green]All assignments for {d} are already scheduled.[/green]"
-                          " Use [bold]--overwrite[/bold] to regenerate.")
-        elif not result["existing_blocks"] and not result["skipped"]:
-            console.print("[green]No more work today![/green]")
-        else:
-            console.print("[yellow]No study blocks could be placed.[/yellow]")
-    else:
-        table = Table(title=f"Study Plan — {d}", show_lines=True)
-        table.add_column("Start", style="cyan")
-        table.add_column("End", style="cyan")
-        table.add_column("Title", style="bold")
-        for b in result["blocks"]:
-            table.add_row(b["start"], b["end"], b["title"])
-        console.print(table)
-        console.print(f"[green]✓[/green] Placed {len(result['blocks'])} block(s).")
+
+    # Generation summary line
+    if result["blocks"]:
+        console.print(f"[green]✓[/green] Placed {len(result['blocks'])} new block(s).")
+    elif result["existing_blocks"] and not result["skipped"]:
+        console.print("[dim]Plan is up to date.[/dim]")
+    elif not result["existing_blocks"] and not result["skipped"]:
+        console.print("[green]No more work today![/green]")
+
     if result["skipped"]:
         console.print(
             f"[yellow]Could not fit:[/yellow] {', '.join(result['skipped'])}"
         )
 
+    # Always show the full schedule for the day
+    all_blocks = _sched.list_blocks(d)
+    if all_blocks:
+        _print_schedule_table(d, all_blocks)
+    else:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+
     if export_ical:
         ics_path = Path(out_path) if out_path else Path.cwd() / f"schedule-{d}.ics"
-        _export_blocks_to_ical(d, _sched.list_blocks(d), ics_path)
+        _export_blocks_to_ical(d, all_blocks, ics_path)
 
 
 # ---------------------------------------------------------------------------
@@ -908,9 +894,11 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
 def _classify(d: dict) -> str:
     if d["source"] == "canvas":
         return "assignment"
-    if d.get("recurrence"):
+    if d["source"] == "gcal":
         return "class"
-    return "other"
+    if d["source"] == "manual":
+        return "personal"
+    return "study"
 
 
 def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
@@ -998,6 +986,30 @@ def _group_overlapping(blocks: list[dict]) -> list[list[dict]]:
         if not placed:
             groups.append([b])
     return groups
+
+
+def _print_schedule_table(d: date, blocks: list[dict]) -> None:
+    """Render a day's blocks as a Rich table."""
+    table = Table(title=f"Schedule — {d}", show_lines=True)
+    table.add_column("Start", style="cyan", width=7)
+    table.add_column("End",   style="cyan", width=7)
+    table.add_column("Title", style="bold")
+    table.add_column("Type")
+    table.add_column("Source", style="dim")
+    _TYPE_STYLE = {
+        "class":      "[blue]class[/blue]",
+        "assignment": "[magenta]assignment[/magenta]",
+        "study":      "[green]study[/green]",
+        "personal":   "[cyan]personal[/cyan]",
+        "break":      "[yellow]break[/yellow]",
+    }
+    for group in _group_overlapping(blocks):
+        for idx, b in enumerate(group):
+            start_cell = b["start"] if idx == 0 else ""
+            end_cell   = b["end"]   if idx == 0 else ""
+            table.add_row(start_cell, end_cell, b["title"][:40],
+                          _TYPE_STYLE.get(b["type"], b["type"]), b["source"])
+    console.print(table)
 
 
 def _render_schedule_email(d: date, blocks: list[dict]) -> tuple[str, str]:

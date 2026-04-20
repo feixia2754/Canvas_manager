@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta, date, time as dt_time
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -21,17 +21,21 @@ class GCalClient:
     ) -> list[dict]:
         """Return upcoming events as normalized deadline dicts."""
         now = datetime.now(tz=timezone.utc)
+        # Start from local midnight so today's already-ended classes are included
+        local_now = datetime.now().astimezone()
+        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_max = now + timedelta(days=days_ahead)
 
         result = self.service.events().list(
             calendarId=calendar_id,
-            timeMin=now.isoformat(),
+            timeMin=today_start.isoformat(),
             timeMax=time_max.isoformat(),
             singleEvents=True,
             orderBy="startTime",
             maxResults=250,
         ).execute()
 
+        today = local_now.date()
         deadlines: list[dict] = []
         for event in result.get("items", []):
             summary = event.get("summary", "").strip()
@@ -40,7 +44,8 @@ class GCalClient:
 
             start_dt = _parse_gcal_time(event.get("start"))
             due_dt = _parse_gcal_time(event.get("end") or event.get("start"))
-            if due_dt is None or due_dt <= now:
+            # Skip events that ended before today (truly past)
+            if due_dt is None or due_dt.astimezone().date() < today:
                 continue
 
             description = event.get("description", "") or ""

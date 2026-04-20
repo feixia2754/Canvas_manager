@@ -66,7 +66,7 @@ def _dt(iso: str) -> datetime:
 
 
 def _assignment(name: str, due_iso: str, submitted: bool = False) -> dict:
-    return {"name": name, "due_at": _dt(due_iso), "submitted": submitted}
+    return {"name": name, "due_at": _dt(due_iso), "submitted": submitted, "source": "canvas", "type": "assignment"}
 
 
 def _event(name: str, start_iso: str, end_iso: str, submitted: bool = False,
@@ -76,6 +76,7 @@ def _event(name: str, start_iso: str, end_iso: str, submitted: bool = False,
         "due_at": _dt(end_iso),
         "start_at": _dt(start_iso),
         "type": etype,
+        "source": "gcal",
         "submitted": submitted,
     }
 
@@ -191,11 +192,11 @@ class TestGeneratePlanEvents:
         assert b["source"] == "gcal"
         assert b["start"] < b["end"]
 
-    def test_event_type_other_placed_too(self, tmp_path):
+    def test_event_type_other_placed_as_class(self, tmp_path):
         _write_deadlines(tmp_path, [_event("Office Hours", _F2PM, _F4PM, etype="other")])
         result = generate_plan(FUTURE)
         assert len(result["blocks"]) == 1
-        assert result["blocks"][0]["type"] == "other"
+        assert result["blocks"][0]["type"] == "class"
 
     def test_submitted_event_skipped(self, tmp_path):
         _write_deadlines(tmp_path, [_event("Done Class", _F2PM, _F4PM, submitted=True)])
@@ -205,13 +206,11 @@ class TestGeneratePlanEvents:
         _write_deadlines(tmp_path, [_event("Other Day", _F2PM, _F4PM)])
         assert generate_plan(TODAY)["blocks"] == []
 
-    def test_past_event_today_not_placed(self, tmp_path):
-        # An event whose end time is in the past should be skipped when planning today
-        past_start = "2026-04-20T00:00:00+00:00"
-        past_end   = "2026-04-20T01:00:00+00:00"
-        _write_deadlines(tmp_path, [_event("Early Class", past_start, past_end)])
+    def test_past_event_today_still_placed(self, tmp_path):
+        # Classes are always placed regardless of current time — full day view
+        _write_deadlines(tmp_path, [_event("Early Class", _NOON, _2PM)])
         result = generate_plan(TODAY)
-        assert result["blocks"] == []
+        assert len(result["blocks"]) == 1
 
     def test_conflicting_event_skipped(self, tmp_path):
         _write_deadlines(tmp_path, [_event("Class", _F2PM, _F4PM)])
@@ -237,9 +236,9 @@ class TestGeneratePlanAssignments:
         _write_deadlines(tmp_path, [_assignment("HW1", _8PM)])
         result = generate_plan(TODAY)
         assert len(result["blocks"]) == 1
-        assert result["blocks"][0]["title"] == "Study: HW1"
-        assert result["blocks"][0]["type"] == "study"
-        assert result["blocks"][0]["source"] == "ai"
+        assert result["blocks"][0]["title"] == "HW1"
+        assert result["blocks"][0]["type"] == "assignment"
+        assert result["blocks"][0]["source"] == "canvas"
 
     def test_assignment_not_due_today_not_placed(self, tmp_path):
         _write_deadlines(tmp_path, [_assignment("HW1", "2026-04-22T12:00:00+00:00")])
@@ -252,7 +251,7 @@ class TestGeneratePlanAssignments:
         ])
         result = generate_plan(TODAY)
         titles = [b["title"] for b in result["blocks"]]
-        assert titles.index("Study: Sooner") < titles.index("Study: Later")
+        assert titles.index("Sooner") < titles.index("Later")
 
     def test_assignment_placed_after_last_class(self, tmp_path):
         _write_habits(tmp_path, {
@@ -266,8 +265,8 @@ class TestGeneratePlanAssignments:
         result = generate_plan(FUTURE)
         blocks = {b["title"]: b for b in result["blocks"]}
         assert "Lecture" in blocks
-        assert "Study: HW1" in blocks
-        assert blocks["Study: HW1"]["start"] >= blocks["Lecture"]["end"]
+        assert "HW1" in blocks
+        assert blocks["HW1"]["start"] >= blocks["Lecture"]["end"]
 
     def test_skips_when_no_slot_fits(self, tmp_path):
         _write_habits(tmp_path, {
