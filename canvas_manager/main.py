@@ -411,12 +411,18 @@ def list_deadlines(days: int) -> None:
 @click.option("--sms-only", "sms_only", is_flag=True, default=False, help="Send SMS only.")
 @click.option("--preview", is_flag=True, default=False, help="Print messages without sending.")
 @click.option("--to-email", "to_email", default=None, help="Override recipient email address.")
+@click.option("--schedule", "include_schedule", is_flag=True, default=False,
+              help="Append today's schedule to the email.")
+@click.option("--schedule-date", "schedule_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to include in schedule section (default: today).")
 def remind(
     days: int | None,
     email_only: bool,
     sms_only: bool,
     preview: bool,
     to_email: str | None,
+    include_schedule: bool,
+    schedule_date,
 ) -> None:
     """
     Send email and/or SMS reminders with upcoming deadlines.
@@ -484,6 +490,24 @@ def remind(
             console.print(f"[green]Sent! ({msg_id})[/green]")
         except Exception as e:
             console.print(f"[red]Failed: {e}[/red]")
+
+    if include_schedule and send_email:
+        sched_day = schedule_date.date() if schedule_date else date.today()
+        blocks = _sched.list_blocks(sched_day)
+        if not blocks:
+            console.print(f"[yellow]No schedule blocks found for {sched_day}.[/yellow]")
+        else:
+            email_cfg = get_email_config()
+            recipient = to_email or email_cfg["to_address"]
+            plain, html = _render_schedule_email(sched_day, blocks)
+            console.print(f"[bold]Sending schedule email to {recipient}...[/bold]", end=" ")
+            try:
+                msg_id = notifier.send_email_raw(
+                    recipient, f"Your schedule for {sched_day}", plain, html
+                )
+                console.print(f"[green]Sent! ({msg_id})[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed: {e}[/red]")
 
 
 # ---------------------------------------------------------------------------
@@ -821,69 +845,6 @@ def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
     console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
 
 
-@schedule.command("export")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to export (default: today).")
-@click.option("--calendar-id", default="primary", show_default=True,
-              help="Google Calendar ID to export into.")
-def schedule_export(plan_date: datetime | None, calendar_id: str) -> None:
-    """Export schedule blocks to Google Calendar."""
-    d = plan_date.date() if plan_date else date.today()
-    blocks = _sched.list_blocks(d)
-    if not blocks:
-        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
-        return
-    try:
-        from .gcal_client import GCalClient
-        from .notifier import get_credentials
-        gcal = GCalClient(get_credentials())
-    except Exception as e:
-        console.print(f"[red]Error connecting to Google Calendar: {e}[/red]")
-        sys.exit(1)
-
-    import pytz
-    local_tz = datetime.now().astimezone().tzinfo
-    exported = 0
-    for b in blocks:
-        start_dt = datetime.combine(d, datetime.strptime(b["start"], "%H:%M").time(),
-                                    tzinfo=local_tz)
-        end_dt   = datetime.combine(d, datetime.strptime(b["end"],   "%H:%M").time(),
-                                    tzinfo=local_tz)
-        try:
-            gcal.create_event(b["title"], start_dt, end_dt, calendar_id)
-            exported += 1
-        except Exception as e:
-            console.print(f"[yellow]Skipped '{b['title'][:30]}': {e}[/yellow]")
-    console.print(f"[green]✓[/green] Exported {exported} block(s) to Google Calendar.")
-
-
-@schedule.command("email")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to email (default: today).")
-@click.option("--to", "recipient", default=None,
-              help="Recipient address (default: your configured email).")
-def schedule_email(plan_date: datetime | None, recipient: str | None) -> None:
-    """Email the day's schedule with overlapping blocks shown side by side."""
-    d = plan_date.date() if plan_date else date.today()
-    blocks = _sched.list_blocks(d)
-    if not blocks:
-        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
-        return
-    try:
-        from .notifier import Notifier, get_credentials
-        from .config import get_email_config
-        cfg = get_email_config()
-        to_addr = recipient or cfg["to_email"]
-        notifier = Notifier(get_credentials())
-        subject = f"Your schedule for {d}"
-        plain, html = _render_schedule_email(d, blocks)
-        notifier.send(to_addr, subject, plain, html)
-        console.print(f"[green]✓[/green] Schedule emailed to {to_addr}.")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
-
-
 # ---------------------------------------------------------------------------
 # plan
 # ---------------------------------------------------------------------------
@@ -893,8 +854,16 @@ def schedule_email(plan_date: datetime | None, recipient: str | None) -> None:
               default=None, help="Day to plan (default: today).")
 @click.option("--overwrite", is_flag=True, default=False,
               help="Clear existing AI blocks before planning.")
-def plan_cmd(plan_date: datetime | None, overwrite: bool) -> None:
-    """Generate a study plan for a day from upcoming deadlines."""
+@click.option("--export", "export_ical", is_flag=True, default=False,
+              help="Write schedule to a .ics file after planning.")
+@click.option("--out", "out_path", default=None,
+              help="Output path for .ics file (default: schedule-YYYY-MM-DD.ics in cwd).")
+def plan_cmd(plan_date: datetime | None, overwrite: bool,
+             export_ical: bool, out_path: str | None) -> None:
+    """Generate a study plan for a day from upcoming deadlines.
+
+    Use --export to also write a .ics file you can import into any calendar app.
+    """
     d = plan_date.date() if plan_date else date.today()
     result = generate_plan(d, overwrite=overwrite)
     habits_note = (
@@ -926,6 +895,10 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool) -> None:
         console.print(
             f"[yellow]Could not fit:[/yellow] {', '.join(result['skipped'])}"
         )
+
+    if export_ical:
+        ics_path = Path(out_path) if out_path else Path.cwd() / f"schedule-{d}.ics"
+        _export_blocks_to_ical(d, _sched.list_blocks(d), ics_path)
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +957,30 @@ def _hhmm_to_minutes(t: str) -> int:
 
 def _minutes_to_hhmm(mins: int) -> str:
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _export_blocks_to_ical(d: date, blocks: list[dict], out_path: Path) -> None:
+    """Write schedule blocks to an iCal (.ics) file."""
+    from icalendar import Calendar, Event as ICalEvent
+    import uuid
+
+    cal = Calendar()
+    cal.add("prodid", "-//canvas-manager//schedule//EN")
+    cal.add("version", "2.0")
+
+    local_tz = datetime.now().astimezone().tzinfo
+    for b in blocks:
+        ev = ICalEvent()
+        ev.add("summary", b["title"])
+        ev.add("dtstart", datetime.combine(
+            d, datetime.strptime(b["start"], "%H:%M").time(), tzinfo=local_tz))
+        ev.add("dtend",   datetime.combine(
+            d, datetime.strptime(b["end"],   "%H:%M").time(), tzinfo=local_tz))
+        ev.add("uid", str(uuid.uuid4()))
+        cal.add_component(ev)
+
+    out_path.write_bytes(cal.to_ical())
+    console.print(f"[green]✓[/green] Exported {len(blocks)} block(s) to {out_path}")
 
 
 def _group_overlapping(blocks: list[dict]) -> list[list[dict]]:

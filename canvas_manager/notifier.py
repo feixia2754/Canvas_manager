@@ -27,7 +27,6 @@ _PROJECT_DIR = _PKG_DIR.parent
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/calendar.events",
 ]
 CREDS_FILE = str(_PROJECT_DIR / "credentials.json")
 TOKEN_FILE = str(_PROJECT_DIR / "token.json")
@@ -79,6 +78,10 @@ class Notifier:
         """Send a formatted HTML email reminder. Returns message ID."""
         subject, html_body, plain_body = _build_email(deadlines, lookahead_days)
         return self._send(to_address, subject, plain_body, html_body)
+
+    def send_email_raw(self, to_address: str, subject: str, plain: str, html: str) -> str:
+        """Send an arbitrary pre-built email. Returns message ID."""
+        return self._send(to_address, subject, plain, html)
 
     # ------------------------------------------------------------------
     # SMS via email-to-SMS gateway (plain text only, kept short)
