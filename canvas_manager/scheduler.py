@@ -243,6 +243,13 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     placed: list[Block] = []
     skipped: list[str] = []
 
+    # Names already covered by existing study blocks (avoid double-booking)
+    already_covered: set[str] = {
+        b["title"].removeprefix("Study: ")
+        for b in existing
+        if b["source"] == "ai" and b["type"] == "study"
+    }
+
     # --- Pass 1: place timed events at their exact slots ---
     for dl in events_today:
         local_start = dl["start_at"].astimezone()
@@ -282,6 +289,8 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     free = _free_slots(last_event_end, sleep, occupied)
 
     for dl in assignments_today:
+        if dl["name"][:40] in already_covered:
+            continue
         placed_this = False
         new_free: list[tuple[int, int]] = []
         for s, e in free:
