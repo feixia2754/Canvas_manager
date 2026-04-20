@@ -24,7 +24,7 @@ from .scheduler import generate_plan
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
 DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_deadlines.json"
-HABITS_FILE = Path(__file__).parent.parent / ".canvas_manager_habits.json"
+HABITS_FILE = Path.home() / ".canvas_manager" / "habits.json"
 
 
 @click.group()
@@ -581,6 +581,8 @@ def habits() -> None:
     def ask_range_list(prompt: str, default: str) -> list[str]:
         while True:
             val = Prompt.ask(prompt, default=default).strip()
+            if not val or val.lower() == "none":
+                return []
             parts = [p.strip() for p in val.split(",") if p.strip()]
             try:
                 out = []
@@ -595,15 +597,27 @@ def habits() -> None:
                 console.print("[red]  Enter comma-separated ranges like 09:00-11:00, 14:00-16:00.[/red]")
 
     d = existing or {}
+
+    # hard_stops stored as [{"start": "HH:MM", "end": "HH:MM"}]; display as ranges for the prompt
+    existing_stops_str = ", ".join(
+        f"{s['start']}-{s['end']}" for s in d.get("hard_stops", [])
+    ) or "none"
+
     profile = {
-        "wake_time":              ask_time(      "  Wake time",                      d.get("wake_time", "07:00")),
-        "sleep_time":             ask_time(      "  Sleep time",                     d.get("sleep_time", "23:00")),
+        "wake_time":              ask_time(      "  Wake time",                         d.get("wake_time", "07:00")),
+        "sleep_time":             ask_time(      "  Sleep time",                        d.get("sleep_time", "23:00")),
         "peak_focus_hours":       ask_range_list("  Peak focus hours (e.g. 09:00-11:00, 14:00-16:00)", ", ".join(d.get("peak_focus_hours", ["09:00-11:00"]))),
-        "preferred_block_minutes":ask_minutes(   "  Preferred focus block (minutes)", d.get("preferred_block_minutes", 90)),
-        "break_cadence_minutes":  ask_minutes(   "  Break cadence (minutes)",         d.get("break_cadence_minutes", 15)),
-        "hard_stop_times":        ask_time_list( "  Hard-stop times (e.g. 12:00, 18:00)", ", ".join(d.get("hard_stop_times", ["18:00"]))),
+        "preferred_block_minutes":ask_minutes(   "  Preferred focus block (minutes)",   d.get("preferred_block_minutes", 90)),
+        "break_minutes":          ask_minutes(   "  Break between blocks (minutes)",    d.get("break_minutes", 15)),
+        "hard_stops":             _parse_hard_stops(
+                                      ask_range_list(
+                                          "  Hard-stop ranges (e.g. 12:00-13:00, 18:00-19:00) — or 'none'",
+                                          existing_stops_str if existing_stops_str != "none" else "",
+                                      )
+                                  ),
     }
 
+    HABITS_FILE.parent.mkdir(parents=True, exist_ok=True)
     HABITS_FILE.write_text(json.dumps(profile, indent=2))
     console.print("\n[green]✓[/green] Habits profile saved.")
     _print_habits(profile)
@@ -622,13 +636,26 @@ def _print_habits(profile: dict) -> None:
     table = Table(title="Your Habits Profile", show_lines=True)
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="bold")
-    table.add_row("Wake time",            profile.get("wake_time", "—"))
-    table.add_row("Sleep time",           profile.get("sleep_time", "—"))
-    table.add_row("Peak focus hours",     ", ".join(profile.get("peak_focus_hours", [])))
-    table.add_row("Focus block",          f"{profile.get('preferred_block_minutes', '—')} min")
-    table.add_row("Break cadence",        f"{profile.get('break_cadence_minutes', '—')} min")
-    table.add_row("Hard stops",           ", ".join(profile.get("hard_stop_times", [])))
+    hard_stops_str = ", ".join(
+        f"{s['start']}–{s['end']}" for s in profile.get("hard_stops", [])
+    ) or "none"
+    table.add_row("Wake time",        profile.get("wake_time", "—"))
+    table.add_row("Sleep time",       profile.get("sleep_time", "—"))
+    table.add_row("Peak focus hours", ", ".join(profile.get("peak_focus_hours", [])))
+    table.add_row("Focus block",      f"{profile.get('preferred_block_minutes', '—')} min")
+    table.add_row("Break between blocks", f"{profile.get('break_minutes', '—')} min")
+    table.add_row("Hard stops",       hard_stops_str)
     console.print(table)
+
+
+def _parse_hard_stops(ranges: list[str]) -> list[dict]:
+    """Convert ["09:00-11:00", ...] to [{"start": "09:00", "end": "11:00"}, ...]."""
+    result = []
+    for r in ranges:
+        if "-" in r:
+            parts = r.split("-", 1)
+            result.append({"start": parts[0].strip(), "end": parts[1].strip()})
+    return result
 
 
 # ---------------------------------------------------------------------------
