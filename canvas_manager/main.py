@@ -19,6 +19,7 @@ from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
 from .notifier import Notifier, get_credentials
 from . import schedule as _sched
+from .scheduler import generate_plan
 
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
@@ -790,6 +791,44 @@ def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
         click.confirm(f"Delete {n} blocks for {d}?", abort=True)
     _sched.save_plan(d, [])
     console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
+
+
+# ---------------------------------------------------------------------------
+# plan
+# ---------------------------------------------------------------------------
+
+@cli.command("plan")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to plan (default: today).")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Clear existing AI blocks before planning.")
+def plan_cmd(plan_date: datetime | None, overwrite: bool) -> None:
+    """Generate a study plan for a day from upcoming deadlines."""
+    d = plan_date.date() if plan_date else date.today()
+    result = generate_plan(d, overwrite=overwrite)
+    habits_note = (
+        "[dim]Using custom habits.[/dim]"
+        if result["habits_used"] == "custom"
+        else "[dim]Using default habits (no ~/.canvas_manager/habits.json found).[/dim]"
+    )
+    console.print(habits_note)
+    if result["existing_blocks"]:
+        console.print(f"[dim]Kept {result['existing_blocks']} existing block(s).[/dim]")
+    if not result["blocks"]:
+        console.print("[yellow]No study blocks could be placed.[/yellow]")
+    else:
+        table = Table(title=f"Study Plan — {d}", show_lines=True)
+        table.add_column("Start", style="cyan")
+        table.add_column("End", style="cyan")
+        table.add_column("Title", style="bold")
+        for b in result["blocks"]:
+            table.add_row(b["start"], b["end"], b["title"])
+        console.print(table)
+        console.print(f"[green]✓[/green] Placed {len(result['blocks'])} block(s).")
+    if result["skipped"]:
+        console.print(
+            f"[yellow]Could not fit:[/yellow] {', '.join(result['skipped'])}"
+        )
 
 
 # ---------------------------------------------------------------------------
