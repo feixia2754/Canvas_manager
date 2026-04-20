@@ -37,6 +37,7 @@ class GCalClient:
             if not summary:
                 continue
 
+            start_dt = _parse_gcal_time(event.get("start"))
             due_dt = _parse_gcal_time(event.get("end") or event.get("start"))
             if due_dt is None or due_dt <= now:
                 continue
@@ -45,6 +46,7 @@ class GCalClient:
             deadlines.append({
                 "name": summary,
                 "due_at": due_dt,
+                "start_at": start_dt,
                 "course": _extract_course(summary, description),
                 "url": event.get("htmlLink", ""),
                 "source": "gcal",

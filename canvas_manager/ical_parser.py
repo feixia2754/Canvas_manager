@@ -25,6 +25,7 @@ def parse_ical(path: str | Path) -> list[dict]:
         dtend = component.get("DTEND")
         url = str(component.get("URL", ""))
 
+        start_dt = _to_aware_datetime(dtstart)
         due_dt = _to_aware_datetime(dtend or dtstart)
         if due_dt is None or due_dt < datetime.now(tz=timezone.utc):
             continue
@@ -32,6 +33,7 @@ def parse_ical(path: str | Path) -> list[dict]:
         deadlines.append({
             "name": summary,
             "due_at": due_dt,
+            "start_at": start_dt,
             "course": _extract_course(summary, description),
             "url": url,
             "source": "ical",

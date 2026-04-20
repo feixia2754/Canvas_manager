@@ -1,8 +1,12 @@
 """Rule-based smart scheduler for canvas-manager.
 
 Reads habit preferences from HABITS_FILE (falls back to DEFAULT_HABITS)
-and upcoming deadlines from the shared deadlines cache, then greedily
-places study blocks into the day's free time sorted by urgency.
+and upcoming deadlines from the shared deadlines cache, then:
+
+  Pass 1 — place timed events (classes, GCal events) at their exact
+            start_at → due_at slots.
+  Pass 2 — place assignment study blocks in remaining free time after
+            the last timed event ends on target_date.
 """
 
 from __future__ import annotations
@@ -42,27 +46,13 @@ def _load_habits() -> tuple[dict, bool]:
 
 
 def _parse_hhmm(s: str) -> int:
-    """Convert "HH:MM" to minutes since midnight.
-
-    Args:
-        s: Time string in "HH:MM" 24-hour format.
-
-    Returns:
-        Integer minutes since midnight.
-    """
+    """Convert "HH:MM" to minutes since midnight."""
     h, m = map(int, s.split(":"))
     return h * 60 + m
 
 
 def _format_hhmm(mins: int) -> str:
-    """Convert minutes since midnight to "HH:MM".
-
-    Args:
-        mins: Minutes since midnight (0–1439).
-
-    Returns:
-        Time string in "HH:MM" 24-hour format.
-    """
+    """Convert minutes since midnight to "HH:MM"."""
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
 
@@ -114,7 +104,7 @@ def _load_deadlines() -> list[dict]:
     """Load cached deadlines from DEADLINES_CACHE.
 
     Returns:
-        List of deadline dicts with timezone-aware due_at datetimes,
+        List of deadline dicts with timezone-aware datetimes,
         or [] if the file does not exist or cannot be parsed.
     """
     if not DEADLINES_CACHE.exists():
@@ -123,6 +113,8 @@ def _load_deadlines() -> list[dict]:
         items = json.loads(DEADLINES_CACHE.read_text())
         for item in items:
             item["due_at"] = datetime.fromisoformat(item["due_at"])
+            if item.get("start_at"):
+                item["start_at"] = datetime.fromisoformat(item["start_at"])
         return items
     except Exception:
         return []
@@ -176,11 +168,30 @@ def _filter_relevant_deadlines(
     ]
 
 
+def _on_target_date(deadline: dict, target_date: date, use_start: bool = False) -> bool:
+    """Return True if the deadline falls on target_date in local time.
+
+    Args:
+        deadline: Deadline dict.
+        target_date: The day to check against.
+        use_start: If True and start_at is present, use start_at; else use due_at.
+
+    Returns:
+        True when the datetime, converted to local timezone, is on target_date.
+    """
+    if use_start and deadline.get("start_at"):
+        dt = deadline["start_at"].astimezone()
+    else:
+        dt = deadline["due_at"].astimezone()
+    return dt.date() == target_date
+
+
 def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     """Generate a study plan for target_date.
 
-    Loads habits, reads existing blocks, computes free slots, then greedily
-    places study blocks for upcoming deadlines sorted by urgency (soonest first).
+    Pass 1: place timed events (those with start_at) at their exact time slots.
+    Pass 2: place assignment study blocks after the last timed event ends,
+            sorted by urgency (soonest due_at first).
 
     Args:
         target_date: The day to plan.
@@ -207,22 +218,70 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     preferred = habits["preferred_block_minutes"]
     break_min = habits["break_minutes"]
 
-    occupied: list[tuple[int, int]] = [
-        (_parse_hhmm(b["start"]), _parse_hhmm(b["end"])) for b in existing
-    ]
-    for hs in habits.get("hard_stops", []):
-        occupied.append((_parse_hhmm(hs["start"]), _parse_hhmm(hs["end"])))
-
-    free = _free_slots(wake, sleep, occupied)
-
     deadlines = _load_deadlines()
-    relevant = _filter_relevant_deadlines(deadlines, target_date)
-    relevant.sort(key=lambda d: _urgency_score(d, target_date))
+
+    # Timed events on target_date (classes, GCal/iCal events with start_at)
+    events_today = sorted(
+        [
+            d for d in deadlines
+            if d.get("start_at") and not d.get("submitted")
+            and _on_target_date(d, target_date, use_start=True)
+        ],
+        key=lambda d: d["start_at"],
+    )
+
+    # Assignments due on target_date
+    assignments_today = sorted(
+        [
+            d for d in deadlines
+            if not d.get("start_at") and not d.get("submitted")
+            and _on_target_date(d, target_date, use_start=False)
+        ],
+        key=lambda d: _urgency_score(d, target_date),
+    )
 
     placed: list[Block] = []
     skipped: list[str] = []
 
-    for dl in relevant:
+    # --- Pass 1: place timed events at their exact slots ---
+    for dl in events_today:
+        local_start = dl["start_at"].astimezone()
+        local_end = dl["due_at"].astimezone()
+        start_mins = local_start.hour * 60 + local_start.minute
+        end_mins = local_end.hour * 60 + local_end.minute
+        if start_mins >= end_mins:
+            skipped.append(dl["name"])
+            continue
+        try:
+            block = _sched.add_block(target_date, {
+                "id": "",
+                "start": _format_hhmm(start_mins),
+                "end": _format_hhmm(end_mins),
+                "title": dl["name"][:40],
+                "type": dl.get("type", "other"),
+                "source": "gcal",
+            })
+            placed.append(block)
+        except ValueError:
+            skipped.append(dl["name"])
+
+    # --- Pass 2: assignment study blocks after last timed event ---
+    all_blocks = _sched.list_blocks(target_date)
+    timed_blocks = [b for b in all_blocks if b["type"] in ("class", "other")]
+    last_event_end = (
+        max(_parse_hhmm(b["end"]) for b in timed_blocks)
+        if timed_blocks else wake
+    )
+
+    occupied: list[tuple[int, int]] = [
+        (_parse_hhmm(b["start"]), _parse_hhmm(b["end"])) for b in all_blocks
+    ]
+    for hs in habits.get("hard_stops", []):
+        occupied.append((_parse_hhmm(hs["start"]), _parse_hhmm(hs["end"])))
+
+    free = _free_slots(last_event_end, sleep, occupied)
+
+    for dl in assignments_today:
         placed_this = False
         new_free: list[tuple[int, int]] = []
         for s, e in free:

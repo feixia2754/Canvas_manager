@@ -895,6 +895,8 @@ def _save_cache(deadlines: list[dict]) -> None:
         item = dict(d)
         if isinstance(item["due_at"], datetime):
             item["due_at"] = item["due_at"].isoformat()
+        if isinstance(item.get("start_at"), datetime):
+            item["start_at"] = item["start_at"].isoformat()
         items.append(item)
     DEADLINES_CACHE.write_text(json.dumps(items, indent=2))
 
@@ -906,6 +908,8 @@ def _load_cache() -> list[dict]:
         items = json.loads(DEADLINES_CACHE.read_text())
         for item in items:
             item["due_at"] = datetime.fromisoformat(item["due_at"])
+            if item.get("start_at"):
+                item["start_at"] = datetime.fromisoformat(item["start_at"])
         return items
     except Exception:
         return []
