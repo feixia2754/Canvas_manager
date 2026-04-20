@@ -113,7 +113,22 @@ jobs:
           canvas-manager sync --no-gcal && echo "Expected failure but got success" && exit 1 || true
           cp .env.bak .env
 
+      # ── habits smoke test ────────────────────────────────────────────────────
+
+      - name: CLI -- habits (first run via piped input)
+        run: |
+          rm -f .canvas_manager_habits.json
+          printf '07:30\n23:00\n09:00-11:00\n90\n15\n18:00\n' | canvas-manager habits
+          test -f .canvas_manager_habits.json || (echo "habits file not created" && exit 1)
+
+      - name: CLI -- habits (existing profile, decline update)
+        run: |
+          printf 'n\n' | canvas-manager habits
+
       # ── pytest suite ─────────────────────────────────────────────────────────
 
       - name: pytest test_cron.py
         run: python -m pytest test_cron.py -v
+
+      - name: pytest test_habits.py
+        run: python -m pytest test_habits.py -v

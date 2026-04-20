@@ -22,6 +22,7 @@ from .notifier import Notifier, get_credentials
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
 DEADLINES_CACHE = Path(__file__).parent.parent / ".canvas_manager_deadlines.json"
+HABITS_FILE = Path(__file__).parent.parent / ".canvas_manager_habits.json"
 
 
 @click.group()
@@ -522,6 +523,110 @@ def clear_cache() -> None:
         return
     DEADLINES_CACHE.unlink()
     console.print(f"[green]✓[/green] Cache deleted. Run [cyan]canvas-manager sync[/cyan] to rebuild.")
+
+
+# ---------------------------------------------------------------------------
+# habits
+# ---------------------------------------------------------------------------
+
+@cli.command("habits")
+def habits() -> None:
+    """Set up or review your daily schedule and focus habits."""
+    existing = _load_habits()
+
+    if existing:
+        _print_habits(existing)
+        if not Confirm.ask("\nWant to update your habits profile?", default=False):
+            return
+
+    console.rule("[bold cyan]Habits Profile[/bold cyan]")
+    console.print("[dim]Press Enter to keep the default shown in brackets.[/dim]\n")
+
+    def ask_time(prompt: str, default: str) -> str:
+        while True:
+            val = Prompt.ask(prompt, default=default).strip()
+            try:
+                h, m = map(int, val.split(":"))
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return f"{h:02d}:{m:02d}"
+            except (ValueError, AttributeError):
+                pass
+            console.print("[red]  Enter a time in HH:MM format (e.g. 07:30).[/red]")
+
+    def ask_minutes(prompt: str, default: int) -> int:
+        while True:
+            val = Prompt.ask(prompt, default=str(default)).strip()
+            try:
+                n = int(val)
+                if n > 0:
+                    return n
+            except ValueError:
+                pass
+            console.print("[red]  Enter a positive whole number.[/red]")
+
+    def ask_time_list(prompt: str, default: str) -> list[str]:
+        while True:
+            val = Prompt.ask(prompt, default=default).strip()
+            parts = [p.strip() for p in val.split(",") if p.strip()]
+            try:
+                for p in parts:
+                    h, m = map(int, p.split(":"))
+                    assert 0 <= h <= 23 and 0 <= m <= 59
+                return [f"{int(p.split(':')[0]):02d}:{int(p.split(':')[1]):02d}" for p in parts]
+            except (ValueError, AssertionError):
+                console.print("[red]  Enter comma-separated times in HH:MM format (e.g. 12:00, 18:00).[/red]")
+
+    def ask_range_list(prompt: str, default: str) -> list[str]:
+        while True:
+            val = Prompt.ask(prompt, default=default).strip()
+            parts = [p.strip() for p in val.split(",") if p.strip()]
+            try:
+                out = []
+                for p in parts:
+                    start, end = p.split("-")
+                    for t in (start.strip(), end.strip()):
+                        h, m = map(int, t.split(":"))
+                        assert 0 <= h <= 23 and 0 <= m <= 59
+                    out.append(p.strip())
+                return out
+            except (ValueError, AssertionError):
+                console.print("[red]  Enter comma-separated ranges like 09:00-11:00, 14:00-16:00.[/red]")
+
+    d = existing or {}
+    profile = {
+        "wake_time":              ask_time(      "  Wake time",                      d.get("wake_time", "07:00")),
+        "sleep_time":             ask_time(      "  Sleep time",                     d.get("sleep_time", "23:00")),
+        "peak_focus_hours":       ask_range_list("  Peak focus hours (e.g. 09:00-11:00, 14:00-16:00)", ", ".join(d.get("peak_focus_hours", ["09:00-11:00"]))),
+        "preferred_block_minutes":ask_minutes(   "  Preferred focus block (minutes)", d.get("preferred_block_minutes", 90)),
+        "break_cadence_minutes":  ask_minutes(   "  Break cadence (minutes)",         d.get("break_cadence_minutes", 15)),
+        "hard_stop_times":        ask_time_list( "  Hard-stop times (e.g. 12:00, 18:00)", ", ".join(d.get("hard_stop_times", ["18:00"]))),
+    }
+
+    HABITS_FILE.write_text(json.dumps(profile, indent=2))
+    console.print("\n[green]✓[/green] Habits profile saved.")
+    _print_habits(profile)
+
+
+def _load_habits() -> dict | None:
+    if not HABITS_FILE.exists():
+        return None
+    try:
+        return json.loads(HABITS_FILE.read_text())
+    except Exception:
+        return None
+
+
+def _print_habits(profile: dict) -> None:
+    table = Table(title="Your Habits Profile", show_lines=True)
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="bold")
+    table.add_row("Wake time",            profile.get("wake_time", "—"))
+    table.add_row("Sleep time",           profile.get("sleep_time", "—"))
+    table.add_row("Peak focus hours",     ", ".join(profile.get("peak_focus_hours", [])))
+    table.add_row("Focus block",          f"{profile.get('preferred_block_minutes', '—')} min")
+    table.add_row("Break cadence",        f"{profile.get('break_cadence_minutes', '—')} min")
+    table.add_row("Hard stops",           ", ".join(profile.get("hard_stop_times", [])))
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------

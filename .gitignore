@@ -7,6 +7,7 @@ credentials.json
 # Cache
 .canvas_manager_v3_deadlines.json
 .canvas_manager_deadlines.json
+.canvas_manager_habits.json
 
 # Python
 __pycache__/
