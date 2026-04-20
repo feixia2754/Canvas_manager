@@ -13,6 +13,24 @@ class GCalClient:
     def __init__(self, creds: Credentials) -> None:
         self.service = build("calendar", "v3", credentials=creds)
 
+    def create_event(
+        self,
+        title: str,
+        start: datetime,
+        end: datetime,
+        calendar_id: str = "primary",
+    ) -> str:
+        """Create a calendar event and return its GCal event id."""
+        body = {
+            "summary": title,
+            "start": {"dateTime": start.isoformat(), "timeZone": str(start.tzinfo)},
+            "end":   {"dateTime": end.isoformat(),   "timeZone": str(end.tzinfo)},
+        }
+        event = self.service.events().insert(
+            calendarId=calendar_id, body=body
+        ).execute()
+        return event["id"]
+
     def get_upcoming_events(
         self,
         days_ahead: int = 30,

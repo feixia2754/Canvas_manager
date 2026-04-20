@@ -27,6 +27,7 @@ _PROJECT_DIR = _PKG_DIR.parent
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
 ]
 CREDS_FILE = str(_PROJECT_DIR / "credentials.json")
 TOKEN_FILE = str(_PROJECT_DIR / "token.json")

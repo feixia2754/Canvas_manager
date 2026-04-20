@@ -679,10 +679,8 @@ def schedule_list(plan_date: datetime | None) -> None:
         console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
         return
     table = Table(title=f"Schedule — {d}", show_lines=True)
-    table.add_column("#", style="dim", width=4)
-    table.add_column("ID", style="dim")
-    table.add_column("Start", style="cyan")
-    table.add_column("End", style="cyan")
+    table.add_column("Start", style="cyan", width=7)
+    table.add_column("End",   style="cyan", width=7)
     table.add_column("Title", style="bold")
     table.add_column("Type")
     table.add_column("Source", style="dim")
@@ -690,9 +688,12 @@ def schedule_list(plan_date: datetime | None) -> None:
         "class": "[blue]class[/blue]", "assignment": "[magenta]assignment[/magenta]",
         "study": "[green]study[/green]", "break": "[yellow]break[/yellow]",
     }
-    for i, b in enumerate(blocks, 1):
-        table.add_row(str(i), b["id"], b["start"], b["end"],
-                      b["title"][:40], _TYPE_STYLE.get(b["type"], b["type"]), b["source"])
+    for group in _group_overlapping(blocks):
+        for idx, b in enumerate(group):
+            start_cell = b["start"] if idx == 0 else ""
+            end_cell   = b["end"]   if idx == 0 else ""
+            table.add_row(start_cell, end_cell, b["title"][:40],
+                          _TYPE_STYLE.get(b["type"], b["type"]), b["source"])
     console.print(table)
 
 
@@ -820,6 +821,69 @@ def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
     console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
 
 
+@schedule.command("export")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to export (default: today).")
+@click.option("--calendar-id", default="primary", show_default=True,
+              help="Google Calendar ID to export into.")
+def schedule_export(plan_date: datetime | None, calendar_id: str) -> None:
+    """Export schedule blocks to Google Calendar."""
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+    if not blocks:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        return
+    try:
+        from .gcal_client import GCalClient
+        from .notifier import get_credentials
+        gcal = GCalClient(get_credentials())
+    except Exception as e:
+        console.print(f"[red]Error connecting to Google Calendar: {e}[/red]")
+        sys.exit(1)
+
+    import pytz
+    local_tz = datetime.now().astimezone().tzinfo
+    exported = 0
+    for b in blocks:
+        start_dt = datetime.combine(d, datetime.strptime(b["start"], "%H:%M").time(),
+                                    tzinfo=local_tz)
+        end_dt   = datetime.combine(d, datetime.strptime(b["end"],   "%H:%M").time(),
+                                    tzinfo=local_tz)
+        try:
+            gcal.create_event(b["title"], start_dt, end_dt, calendar_id)
+            exported += 1
+        except Exception as e:
+            console.print(f"[yellow]Skipped '{b['title'][:30]}': {e}[/yellow]")
+    console.print(f"[green]✓[/green] Exported {exported} block(s) to Google Calendar.")
+
+
+@schedule.command("email")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to email (default: today).")
+@click.option("--to", "recipient", default=None,
+              help="Recipient address (default: your configured email).")
+def schedule_email(plan_date: datetime | None, recipient: str | None) -> None:
+    """Email the day's schedule with overlapping blocks shown side by side."""
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+    if not blocks:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        return
+    try:
+        from .notifier import Notifier, get_credentials
+        from .config import get_email_config
+        cfg = get_email_config()
+        to_addr = recipient or cfg["to_email"]
+        notifier = Notifier(get_credentials())
+        subject = f"Your schedule for {d}"
+        plain, html = _render_schedule_email(d, blocks)
+        notifier.send(to_addr, subject, plain, html)
+        console.print(f"[green]✓[/green] Schedule emailed to {to_addr}.")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # plan
 # ---------------------------------------------------------------------------
@@ -920,6 +984,76 @@ def _hhmm_to_minutes(t: str) -> int:
 
 def _minutes_to_hhmm(mins: int) -> str:
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _group_overlapping(blocks: list[dict]) -> list[list[dict]]:
+    """Group blocks into clusters where at least one pair overlaps."""
+    groups: list[list[dict]] = []
+    for b in sorted(blocks, key=lambda x: x["start"]):
+        placed = False
+        for g in groups:
+            if any(_hhmm_to_minutes(b["start"]) < _hhmm_to_minutes(x["end"])
+                   and _hhmm_to_minutes(x["start"]) < _hhmm_to_minutes(b["end"])
+                   for x in g):
+                g.append(b)
+                placed = True
+                break
+        if not placed:
+            groups.append([b])
+    return groups
+
+
+def _render_schedule_email(d: date, blocks: list[dict]) -> tuple[str, str]:
+    """Return (plain_text, html) for a day's schedule."""
+    _TYPE_COLOR = {"class": "#3B82F6", "study": "#22C55E",
+                   "break": "#EAB308", "assignment": "#A855F7"}
+
+    # plain text
+    lines = [f"Your schedule for {d}", "=" * 40]
+    for group in _group_overlapping(blocks):
+        if len(group) == 1:
+            b = group[0]
+            lines.append(f"{b['start']}–{b['end']}  {b['title']}")
+        else:
+            time_range = f"{group[0]['start']}–{max(b['end'] for b in group)}"
+            lines.append(f"{time_range}  [overlapping]")
+            for b in group:
+                lines.append(f"   • {b['start']}–{b['end']}  {b['title']}")
+    plain = "\n".join(lines)
+
+    # html
+    rows = []
+    for group in _group_overlapping(blocks):
+        if len(group) == 1:
+            b = group[0]
+            color = _TYPE_COLOR.get(b["type"], "#6B7280")
+            rows.append(
+                f"<tr><td style='padding:6px 12px;color:#6B7280;white-space:nowrap'>"
+                f"{b['start']}–{b['end']}</td>"
+                f"<td colspan='2' style='padding:6px 12px;border-left:3px solid {color}'>"
+                f"<strong>{b['title']}</strong>"
+                f"<span style='color:#9CA3AF;font-size:12px'> [{b['type']}]</span></td></tr>"
+            )
+        else:
+            # side-by-side columns for overlapping blocks
+            time_cell = (f"<td style='padding:6px 12px;color:#6B7280;white-space:nowrap;"
+                         f"vertical-align:top' rowspan='{len(group)}'>"
+                         f"{group[0]['start']}–{max(b['end'] for b in group)}</td>")
+            for i, b in enumerate(group):
+                color = _TYPE_COLOR.get(b["type"], "#6B7280")
+                cell = (f"<td style='padding:4px 8px;border-left:3px solid {color};"
+                        f"background:#F9FAFB'>"
+                        f"<strong>{b['title']}</strong> "
+                        f"<span style='color:#9CA3AF;font-size:11px'>"
+                        f"{b['start']}–{b['end']} [{b['type']}]</span></td>")
+                rows.append(f"<tr>{time_cell if i == 0 else ''}{cell}</tr>")
+
+    html = f"""<html><body style='font-family:sans-serif;max-width:600px;margin:auto'>
+<h2 style='color:#1F2937'>Schedule — {d}</h2>
+<table style='border-collapse:collapse;width:100%'>
+{''.join(rows)}
+</table></body></html>"""
+    return plain, html
 
 
 def _save_cache(deadlines: list[dict]) -> None:
