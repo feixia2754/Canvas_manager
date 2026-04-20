@@ -218,9 +218,14 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
     preferred = habits["preferred_block_minutes"]
     break_min = habits["break_minutes"]
 
+    # For today, never place blocks in time that has already passed
+    now_local = datetime.now().astimezone()
+    is_today = (target_date == now_local.date())
+    now_mins = now_local.hour * 60 + now_local.minute if is_today else 0
+
     deadlines = _load_deadlines()
 
-    # Timed events on target_date (classes, GCal/iCal events with start_at)
+    # Timed events on target_date — skip any whose end time has already passed
     events_today = sorted(
         [
             d for d in deadlines
@@ -230,7 +235,7 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         key=lambda d: d["start_at"],
     )
 
-    # Assignments due on target_date
+    # Assignments due on target_date (submitted ones already excluded)
     assignments_today = sorted(
         [
             d for d in deadlines
@@ -259,6 +264,9 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         if start_mins >= end_mins:
             skipped.append(dl["name"])
             continue
+        # Skip classes that have already ended today
+        if is_today and end_mins <= now_mins:
+            continue
         try:
             block = _sched.add_block(target_date, {
                 "id": "",
@@ -280,13 +288,16 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         if timed_blocks else wake
     )
 
+    # Never start before now when planning today
+    free_start = max(last_event_end, now_mins) if is_today else last_event_end
+
     occupied: list[tuple[int, int]] = [
         (_parse_hhmm(b["start"]), _parse_hhmm(b["end"])) for b in all_blocks
     ]
     for hs in habits.get("hard_stops", []):
         occupied.append((_parse_hhmm(hs["start"]), _parse_hhmm(hs["end"])))
 
-    free = _free_slots(last_event_end, sleep, occupied)
+    free = _free_slots(free_start, sleep, occupied)
 
     for dl in assignments_today:
         if dl["name"][:40] in already_covered:

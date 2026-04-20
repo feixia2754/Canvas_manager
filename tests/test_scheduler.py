@@ -17,13 +17,20 @@ from canvas_manager.scheduler import (
     generate_plan,
 )
 
-TODAY = date(2026, 4, 20)
-# Noon UTC on target date — April 20 in all UTC-12..UTC+11 timezones
+TODAY  = date(2026, 4, 20)
+FUTURE = date(2026, 5, 1)   # a date clearly in the future for event tests
+
+# Times on TODAY
 _NOON = "2026-04-20T12:00:00+00:00"
 _2PM  = "2026-04-20T14:00:00+00:00"
 _4PM  = "2026-04-20T16:00:00+00:00"
 _6PM  = "2026-04-20T18:00:00+00:00"
 _8PM  = "2026-04-20T20:00:00+00:00"
+
+# Times on FUTURE (May 1)
+_F2PM = "2026-05-01T14:00:00+00:00"
+_F4PM = "2026-05-01T16:00:00+00:00"
+_F8PM = "2026-05-01T20:00:00+00:00"
 
 
 # ---------------------------------------------------------------------------
@@ -176,51 +183,43 @@ class TestGeneratePlanHabits:
 
 class TestGeneratePlanEvents:
     def test_class_placed_at_exact_time(self, tmp_path):
-        _write_deadlines(tmp_path, [_event("Lecture", _2PM, _4PM)])
-        result = generate_plan(TODAY)
+        _write_deadlines(tmp_path, [_event("Lecture", _F2PM, _F4PM)])
+        result = generate_plan(FUTURE)
         assert len(result["blocks"]) == 1
         b = result["blocks"][0]
         assert b["type"] == "class"
         assert b["source"] == "gcal"
-        # start/end in local time — just verify they're HH:MM strings and end > start
         assert b["start"] < b["end"]
 
     def test_event_type_other_placed_too(self, tmp_path):
-        _write_deadlines(tmp_path, [_event("Office Hours", _2PM, _4PM, etype="other")])
-        result = generate_plan(TODAY)
+        _write_deadlines(tmp_path, [_event("Office Hours", _F2PM, _F4PM, etype="other")])
+        result = generate_plan(FUTURE)
         assert len(result["blocks"]) == 1
         assert result["blocks"][0]["type"] == "other"
 
     def test_submitted_event_skipped(self, tmp_path):
-        _write_deadlines(tmp_path, [_event("Done Class", _2PM, _4PM, submitted=True)])
+        _write_deadlines(tmp_path, [_event("Done Class", _F2PM, _F4PM, submitted=True)])
+        assert generate_plan(FUTURE)["blocks"] == []
+
+    def test_event_on_wrong_date_not_placed(self, tmp_path):
+        _write_deadlines(tmp_path, [_event("Other Day", _F2PM, _F4PM)])
+        assert generate_plan(TODAY)["blocks"] == []
+
+    def test_past_event_today_not_placed(self, tmp_path):
+        # An event whose end time is in the past should be skipped when planning today
+        past_start = "2026-04-20T00:00:00+00:00"
+        past_end   = "2026-04-20T01:00:00+00:00"
+        _write_deadlines(tmp_path, [_event("Early Class", past_start, past_end)])
         result = generate_plan(TODAY)
         assert result["blocks"] == []
 
-    def test_event_on_wrong_date_not_placed(self, tmp_path):
-        _write_deadlines(tmp_path, [
-            _event("Tomorrow", "2026-04-21T14:00:00+00:00", "2026-04-21T16:00:00+00:00")
-        ])
-        assert generate_plan(TODAY)["blocks"] == []
-
     def test_conflicting_event_skipped(self, tmp_path):
-        # pre-add a block that overlaps
-        schedule.add_block(TODAY, {
-            "id": "", "start": "10:00", "end": "12:00",
-            "title": "Existing", "type": "class", "source": "manual",
-        })
-        # event at same local window — use times that map to 10:xx–11:xx local
-        # We don't know the test machine's offset, so instead write an event
-        # whose UTC range clearly overlaps the existing 10:00–12:00 local block
-        # by placing a manual block at the event's converted time first.
-        # Simplest: add a second overlapping event via the cache and verify skip.
-        _write_deadlines(tmp_path, [_event("Class", _2PM, _4PM)])
+        _write_deadlines(tmp_path, [_event("Class", _F2PM, _F4PM)])
         _write_habits(tmp_path, {
             "wake_time": "00:00", "sleep_time": "23:59",
             "preferred_block_minutes": 30, "break_minutes": 5, "hard_stops": [],
         })
-        result = generate_plan(TODAY)
-        # The event itself should be placed (no overlap with Existing unless
-        # they happen to collide in local time — just verify no crash).
+        result = generate_plan(FUTURE)
         assert isinstance(result["blocks"], list)
 
 
@@ -261,14 +260,13 @@ class TestGeneratePlanAssignments:
             "preferred_block_minutes": 60, "break_minutes": 10, "hard_stops": [],
         })
         _write_deadlines(tmp_path, [
-            _event("Lecture", _2PM, _4PM),
-            _assignment("HW1", _8PM),
+            _event("Lecture", _F2PM, _F4PM),
+            _assignment("HW1", _F8PM),
         ])
-        result = generate_plan(TODAY)
+        result = generate_plan(FUTURE)
         blocks = {b["title"]: b for b in result["blocks"]}
         assert "Lecture" in blocks
         assert "Study: HW1" in blocks
-        # study block must start at or after lecture end
         assert blocks["Study: HW1"]["start"] >= blocks["Lecture"]["end"]
 
     def test_skips_when_no_slot_fits(self, tmp_path):

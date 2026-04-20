@@ -842,7 +842,11 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool) -> None:
     if result["existing_blocks"]:
         console.print(f"[dim]Kept {result['existing_blocks']} existing block(s).[/dim]")
     if not result["blocks"]:
-        console.print("[yellow]No study blocks could be placed.[/yellow]")
+        if result["existing_blocks"] and not result["skipped"]:
+            console.print(f"[green]All assignments for {d} are already scheduled.[/green]"
+                          " Use [bold]--overwrite[/bold] to regenerate.")
+        else:
+            console.print("[yellow]No study blocks could be placed.[/yellow]")
     else:
         table = Table(title=f"Study Plan — {d}", show_lines=True)
         table.add_column("Start", style="cyan")
