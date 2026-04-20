@@ -717,7 +717,7 @@ def schedule_add(title: str, start: str, end: str, block_type: str,
         console.print(f"[green]✓[/green] Added block {block['id']} "
                       f"({block['start']}–{block['end']} {block['title']}).")
     except ValueError:
-        # If every conflicting block is an AI study block, bump them forward
+        # If every conflicting block is AI-placed, stack the new block alongside them
         new_start = _hhmm_to_minutes(start)
         new_end   = _hhmm_to_minutes(end)
         existing  = _sched.load_plan(d)
@@ -728,30 +728,15 @@ def schedule_add(title: str, start: str, end: str, block_type: str,
             console.print(f"[red]Error: overlaps a manually-added block — "
                           f"move or delete it first.[/red]")
             sys.exit(1)
-        # Remove conflicting AI blocks, place the manual block, re-chain AI blocks after
-        kept = [b for b in existing if b not in conflicts]
-        _sched.save_plan(d, kept)
-        block = _sched.add_block(d, {
-            "id": "", "start": start, "end": end,
+        from .schedule import _generate_id
+        new_block: _sched.Block = {
+            "id": _generate_id(), "start": start, "end": end,
             "title": title, "type": block_type, "source": "manual",
-        })
-        console.print(f"[green]✓[/green] Added block {block['id']} "
-                      f"({block['start']}–{block['end']} {block['title']}).")
-        habits = _load_habits() or {}
-        break_min = habits.get("break_minutes", 15)
-        cursor = new_end + break_min
-        for b in sorted(conflicts, key=lambda x: x["start"]):
-            dur = _hhmm_to_minutes(b["end"]) - _hhmm_to_minutes(b["start"])
-            try:
-                moved = _sched.add_block(d, {**b, "id": "",
-                                             "start": _minutes_to_hhmm(cursor),
-                                             "end":   _minutes_to_hhmm(cursor + dur)})
-                console.print(f"[dim]  Shifted '{b['title'][:30]}' → "
-                              f"{moved['start']}–{moved['end']}[/dim]")
-                cursor = _hhmm_to_minutes(moved["end"]) + break_min
-            except ValueError:
-                console.print(f"[yellow]  Could not reschedule '{b['title'][:30]}' "
-                              f"(no room).[/yellow]")
+        }
+        existing.append(new_block)
+        _sched.save_plan(d, existing)
+        console.print(f"[green]✓[/green] Added block {new_block['id']} "
+                      f"({new_block['start']}–{new_block['end']} {new_block['title']}).")
 
 
 @schedule.command("move")
