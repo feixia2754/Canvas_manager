@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import click
@@ -18,6 +18,7 @@ from .canvas_client import CanvasClient, parse_due_date
 from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
 from .notifier import Notifier, get_credentials
+from . import schedule as _sched
 
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
@@ -630,6 +631,168 @@ def _print_habits(profile: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# schedule
+# ---------------------------------------------------------------------------
+
+@cli.group()
+def schedule() -> None:
+    """Manage daily schedule blocks."""
+    pass
+
+
+@schedule.command("list")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to list (default: today).")
+def schedule_list(plan_date: datetime | None) -> None:
+    """List scheduled blocks for a day."""
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+    if not blocks:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        return
+    table = Table(title=f"Schedule — {d}", show_lines=True)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("ID", style="dim")
+    table.add_column("Start", style="cyan")
+    table.add_column("End", style="cyan")
+    table.add_column("Title", style="bold")
+    table.add_column("Type")
+    table.add_column("Source", style="dim")
+    _TYPE_STYLE = {
+        "class": "[blue]class[/blue]", "assignment": "[magenta]assignment[/magenta]",
+        "study": "[green]study[/green]", "break": "[yellow]break[/yellow]",
+    }
+    for i, b in enumerate(blocks, 1):
+        table.add_row(str(i), b["id"], b["start"], b["end"],
+                      b["title"][:40], _TYPE_STYLE.get(b["type"], b["type"]), b["source"])
+    console.print(table)
+
+
+@schedule.command("add")
+@click.argument("title")
+@click.option("--from", "start", required=True, metavar="HH:MM", help="Start time.")
+@click.option("--to",   "end",   required=True, metavar="HH:MM", help="End time.")
+@click.option("--type", "block_type",
+              type=click.Choice(["class", "assignment", "study", "break", "other"]),
+              default="study", show_default=True)
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to add to (default: today).")
+def schedule_add(title: str, start: str, end: str, block_type: str,
+                 plan_date: datetime | None) -> None:
+    """Add a new block to a day's schedule."""
+    d = plan_date.date() if plan_date else date.today()
+    try:
+        block = _sched.add_block(d, {
+            "id": "", "start": start, "end": end,
+            "title": title, "type": block_type, "source": "manual",
+        })
+        console.print(f"[green]✓[/green] Added block {block['id']} "
+                      f"({block['start']}–{block['end']} {block['title']}).")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@schedule.command("move")
+@click.argument("block_id")
+@click.option("--from", "start", default=None, metavar="HH:MM", help="New start time.")
+@click.option("--to",   "end",   default=None, metavar="HH:MM", help="New end time.")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day of the block (default: today).")
+def schedule_move(block_id: str, start: str | None, end: str | None,
+                  plan_date: datetime | None) -> None:
+    """Move a block, preserving duration when only one bound is given."""
+    d = plan_date.date() if plan_date else date.today()
+    if start is None and end is None:
+        console.print("[red]Error: provide at least --from or --to.[/red]")
+        sys.exit(1)
+    try:
+        blocks = _sched.load_plan(d)
+        block = next((b for b in blocks if b["id"] == block_id), None)
+        if block is None:
+            raise KeyError(f"No block with id '{block_id}' on {d}")
+        if start is not None and end is not None:
+            new_start, new_end = start, end
+        elif end is not None:
+            dur = _hhmm_to_minutes(block["end"]) - _hhmm_to_minutes(block["start"])
+            new_start = _minutes_to_hhmm(_hhmm_to_minutes(end) - dur)
+            new_end = end
+        else:
+            dur = _hhmm_to_minutes(block["end"]) - _hhmm_to_minutes(block["start"])
+            new_start = start
+            new_end = _minutes_to_hhmm(_hhmm_to_minutes(start) + dur)
+        updated = _sched.update_block(d, block_id, {"start": new_start, "end": new_end})
+        console.print(f"[green]✓[/green] Moved {block_id} to {updated['start']}–{updated['end']}.")
+    except (ValueError, KeyError) as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@schedule.command("update")
+@click.argument("block_id")
+@click.option("--title", default=None, help="New title.")
+@click.option("--type", "block_type",
+              type=click.Choice(["class", "assignment", "study", "break", "other"]),
+              default=None, help="New block type.")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day of the block (default: today).")
+def schedule_update(block_id: str, title: str | None, block_type: str | None,
+                    plan_date: datetime | None) -> None:
+    """Update fields on an existing block."""
+    d = plan_date.date() if plan_date else date.today()
+    updates: dict = {}
+    if title is not None:
+        updates["title"] = title
+    if block_type is not None:
+        updates["type"] = block_type
+    if not updates:
+        console.print("[yellow]Nothing to update — provide --title or --type.[/yellow]")
+        return
+    try:
+        _sched.update_block(d, block_id, updates)
+        console.print(f"[green]✓[/green] Updated block {block_id}.")
+    except (ValueError, KeyError) as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@schedule.command("delete")
+@click.argument("block_id")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day of the block (default: today).")
+def schedule_delete(block_id: str, yes: bool, plan_date: datetime | None) -> None:
+    """Delete a block from a day's schedule."""
+    d = plan_date.date() if plan_date else date.today()
+    if not yes:
+        click.confirm(f"Delete block {block_id}?", abort=True)
+    try:
+        _sched.delete_block(d, block_id)
+        console.print(f"[green]✓[/green] Deleted block {block_id}.")
+    except KeyError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@schedule.command("clear")
+@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to clear (default: today).")
+def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
+    """Delete all blocks for a day."""
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.load_plan(d)
+    n = len(blocks)
+    if n == 0:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        return
+    if not yes:
+        click.confirm(f"Delete {n} blocks for {d}?", abort=True)
+    _sched.save_plan(d, [])
+    console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -676,6 +839,15 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
         table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), type_str, submitted)
 
     console.print(table)
+
+
+def _hhmm_to_minutes(t: str) -> int:
+    h, m = map(int, t.split(":"))
+    return h * 60 + m
+
+
+def _minutes_to_hhmm(mins: int) -> str:
+    return f"{mins // 60:02d}:{mins % 60:02d}"
 
 
 def _save_cache(deadlines: list[dict]) -> None:
