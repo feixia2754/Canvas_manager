@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "canvas-manager"
-version = "0.2.0"
+version = "0.3.0"
 description = "Canvas + iCal deadlines → email and SMS reminders via Gmail API (no Twilio)"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,7 +22,7 @@ dependencies = [
 canvas-manager = "canvas_manager.main:cli"
 
 [tool.bumpversion]
-current_version = "0.2.0"
+current_version = "0.3.0"
 commit = true
 tag = true
 
