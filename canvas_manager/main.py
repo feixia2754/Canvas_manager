@@ -906,6 +906,33 @@ def schedule_cmd(command_text: str, plan_date: datetime | None, preview: bool) -
 # plan
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+@cli.command("export")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to export (default: today).")
+@click.option("--out", "out_path", default=None,
+              help="Output file path (default: schedule-YYYY-MM-DD.ics).")
+def export_cmd(plan_date: datetime | None, out_path: str | None) -> None:
+    """Export a day's block schedule to an iCal (.ics) file.
+
+    \b
+    Examples:
+      mana export
+      mana export --date 2026-05-01
+      mana export --out ~/Downloads/plan.ics
+    """
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+    if not blocks:
+        console.print(f"[yellow]No blocks scheduled for {d}. Run 'mana plan' first.[/yellow]")
+        return
+    ics_path = Path(out_path) if out_path else Path.cwd() / f"schedule-{d}.ics"
+    _export_blocks_to_ical(d, blocks, ics_path)
+
+
 @cli.command("plan")
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day to plan (default: today). Related: --overwrite, --export.")

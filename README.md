@@ -202,6 +202,20 @@ mana schedule "add lunch at noon" --preview   # show changes without saving
 
 ---
 
+### `export`
+Export a day's block schedule to an iCal (`.ics`) file. Import the result into
+Google Calendar, Apple Calendar, or any calendar app.
+
+```bash
+mana export                          # today → schedule-YYYY-MM-DD.ics
+mana export --date 2026-05-01
+mana export --out ~/Downloads/plan.ics
+```
+
+> Tip: `mana plan --export` generates and exports in one step.
+
+---
+
 ### `import-ical`
 Import a `.ics` calendar file and merge it with Canvas deadlines.
 
