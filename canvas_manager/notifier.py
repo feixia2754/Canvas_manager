@@ -87,6 +87,10 @@ class Notifier:
     # SMS via email-to-SMS gateway (plain text only, kept short)
     # ------------------------------------------------------------------
 
+    def send_sms_raw(self, sms_email: str, text: str) -> str:
+        """Send an arbitrary plain-text SMS via carrier gateway."""
+        return self._send(sms_email, subject="Canvas", plain=text, html=None)
+
     def send_sms(self, sms_email: str, deadlines: list[dict], lookahead_days: int) -> str:
         """
         Send an SMS by emailing the carrier's SMS gateway address.

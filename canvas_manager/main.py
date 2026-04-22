@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
 from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config, get_gcal_config, get_gemini_config
-from .gemini_client import classify_events, estimate_durations, improve_schedule as gemini_improve
+from .gemini_client import classify_events, estimate_durations, improve_schedule as gemini_improve, parse_schedule_command
 from .canvas_client import CanvasClient, parse_due_date
 from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
@@ -249,7 +249,7 @@ GEMINI_MODEL=gemini-2.0-flash-lite
     console.print("  2. Run [cyan]canvas-manager sync[/cyan] to fetch your first deadlines")
     console.print("  3. Run [cyan]canvas-manager plan[/cyan] to generate today's schedule")
     console.print("  4. Run [cyan]canvas-manager setup-cron[/cyan] to install daily automated reminders")
-    console.print("  5. Run [cyan]canvas-manager remind --preview[/cyan] to preview a reminder\n")
+    console.print("  5. Run [cyan]canvas-manager todo[/cyan] to preview a reminder summary\n")
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ def import_ical(ical_file: str | None) -> None:
         d.pop("recurrence", None)
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
-    console.print(f"\n[dim]Saved. Run [bold]canvas-manager list[/bold] to view or [bold]canvas-manager remind[/bold] to send notifications.[/dim]")
+    console.print(f"\n[dim]Saved. Run [bold]canvas-manager list[/bold] to view or [bold]canvas-manager todo[/bold] to see a summary.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -423,92 +423,97 @@ def list_deadlines(days: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# remind
+# todo
 # ---------------------------------------------------------------------------
 
-@cli.command()
-@click.option("--days", default=None, type=int, help="Override lookahead days.")
-@click.option("--email-only", "email_only", is_flag=True, default=False,
-              help="Send email only (skip SMS). Related: --sms-only, --to-email, --preview.")
-@click.option("--sms-only", "sms_only", is_flag=True, default=False,
-              help="Send SMS only (skip email). Related: --email-only.")
-@click.option("--preview", is_flag=True, default=False,
-              help="Print messages without sending. Related: --email-only, --sms-only.")
-@click.option("--to-email", "to_email", default=None,
-              help="Override recipient email address. Related: --email-only.")
-def remind(
+@cli.command("todo")
+@click.option("--days", default=None, type=int, help="Lookahead days (default from config).")
+@click.option("--email", "send_email", is_flag=True, default=False, help="Send email.")
+@click.option("--sms", "send_sms", is_flag=True, default=False, help="Send SMS.")
+@click.option("--to-email", "to_email", default=None, help="Override recipient email.")
+@click.option("--assignments", "show_assignments", is_flag=True, default=False, help="Show assignment details.")
+@click.option("--classes", "show_classes", is_flag=True, default=False, help="Show class details.")
+@click.option("--personal", "show_personal", is_flag=True, default=False, help="Show personal details.")
+def todo(
     days: int | None,
-    email_only: bool,
-    sms_only: bool,
-    preview: bool,
+    send_email: bool,
+    send_sms: bool,
     to_email: str | None,
+    show_assignments: bool,
+    show_classes: bool,
+    show_personal: bool,
 ) -> None:
     """
-    Send email and/or SMS reminders with upcoming deadlines.
-
-    By default sends both. Use --email-only or --sms-only to send just one.
+    Show upcoming deadlines summary. Use --email/--sms to send.
 
     \b
     Examples:
-      canvas-manager remind
-      canvas-manager remind --preview
-      canvas-manager remind --email-only
-      canvas-manager remind --sms-only
-      canvas-manager remind --days 5
+      canvas-manager todo
+      canvas-manager todo --assignments
+      canvas-manager todo --email --sms
+      canvas-manager todo --days 7 --classes
     """
     reminder_cfg = get_reminder_config()
     lookahead = days if days is not None else reminder_cfg["lookahead_days"]
     deadlines = _load_cache()
 
     if not deadlines:
-        console.print("[yellow]No cache found. Run sync or import-ical first.[/yellow]")
+        console.print("[yellow]No cache found. Run sync first.[/yellow]")
         return
 
-    send_email = not sms_only
-    send_sms = not email_only
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now + timedelta(days=lookahead)
+    upcoming = sorted(
+        [d for d in deadlines if now <= d["due_at"] <= cutoff],
+        key=lambda d: d["due_at"],
+    )
 
-    # ---- Preview ----
-    if preview:
+    assignments = [d for d in upcoming if d.get("type") in ("assignment", "study")]
+    classes     = [d for d in upcoming if d.get("type") == "class"]
+    personal    = [d for d in upcoming if d.get("type") in ("personal", "other")]
+
+    # Summary line — always shown
+    parts = []
+    if assignments:
+        parts.append(f"[magenta]{len(assignments)} assignment{'s' if len(assignments) != 1 else ''}[/magenta]")
+    if classes:
+        parts.append(f"[blue]{len(classes)} class{'es' if len(classes) != 1 else ''}[/blue]")
+    if personal:
+        parts.append(f"[cyan]{len(personal)} personal item{'s' if len(personal) != 1 else ''}[/cyan]")
+
+    if parts:
+        console.print(f"[bold]Next {lookahead} days:[/bold] {', '.join(parts)}")
+    else:
+        console.print(f"[green]Nothing due in the next {lookahead} days.[/green]")
+
+    # Optional detail tables
+    if show_assignments and assignments:
+        _print_table(assignments, title=f"Assignments & Study — next {lookahead} days")
+    if show_classes and classes:
+        _print_table(classes, title=f"Classes — next {lookahead} days")
+    if show_personal and personal:
+        _print_table(personal, title=f"Personal & Other — next {lookahead} days")
+
+    # Send
+    if send_email or send_sms:
+        notifier = Notifier()
         if send_email:
-            from .notifier import _build_email
-            subject, _, plain = _build_email(deadlines, lookahead)
-            console.print(f"\n[bold cyan]EMAIL PREVIEW[/bold cyan]")
-            console.print(f"[bold]Subject:[/bold] {subject}")
-            console.print(f"[dim]{'─'*60}[/dim]")
-            console.print(plain)
-
+            email_cfg = get_email_config()
+            recipient = to_email or email_cfg["to_address"]
+            console.print(f"[bold]Sending todo email to {recipient}...[/bold]", end=" ")
+            try:
+                msg_id = notifier.send_email(recipient, deadlines, lookahead)
+                console.print(f"[green]Sent! ({msg_id})[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed: {e}[/red]")
         if send_sms:
-            from .notifier import _build_sms
-            sms_body = _build_sms(deadlines, lookahead)
-            console.print(f"\n[bold yellow]SMS PREVIEW[/bold yellow]")
-            console.print(f"[dim]{'─'*60}[/dim]")
-            console.print(sms_body)
-            console.print(f"[dim]({len(sms_body)} chars)[/dim]")
-
-        console.print("\n[yellow]--preview mode: nothing sent.[/yellow]")
-        return
-
-    # ---- Send ----
-    notifier = Notifier()
-
-    if send_email:
-        email_cfg = get_email_config()
-        recipient = to_email or email_cfg["to_address"]
-        console.print(f"[bold]Sending email to {recipient}...[/bold]", end=" ")
-        try:
-            msg_id = notifier.send_email(recipient, deadlines, lookahead)
-            console.print(f"[green]Sent! ({msg_id})[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed: {e}[/red]")
-
-    if send_sms:
-        sms_cfg = get_sms_config()
-        console.print(f"[bold]Sending SMS to {sms_cfg['phone']} via {sms_cfg['sms_email']}...[/bold]", end=" ")
-        try:
-            msg_id = notifier.send_sms(sms_cfg["sms_email"], deadlines, lookahead)
-            console.print(f"[green]Sent! ({msg_id})[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed: {e}[/red]")
+            sms_cfg = get_sms_config()
+            console.print(f"[bold]Sending todo SMS...[/bold]", end=" ")
+            try:
+                msg_id = notifier.send_sms(sms_cfg["sms_email"], deadlines, lookahead)
+                console.print(f"[green]Sent! ({msg_id})[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed: {e}[/red]")
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +523,7 @@ def remind(
 @cli.command("setup-cron")
 @click.option("--time", "reminder_time", default=None, help="Send time HH:MM (24h).")
 def setup_cron(reminder_time: str | None) -> None:
-    """Install (or reinstall) the daily sync + remind cron job."""
+    """Install (or reinstall) the daily sync + todo cron job."""
     from shutil import which
     import subprocess
 
@@ -532,7 +537,7 @@ def setup_cron(reminder_time: str | None) -> None:
 
     cmd = which("canvas-manager") or "canvas-manager"
     log = Path.home() / ".canvas_manager.log"
-    cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} remind >> {log} 2>&1"
+    cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} todo --email --sms >> {log} 2>&1"
 
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     existing_cron = result.stdout if result.returncode == 0 else ""
@@ -542,7 +547,7 @@ def setup_cron(reminder_time: str | None) -> None:
     )
     new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
     subprocess.run(["crontab", "-"], input=new_cron, text=True)
-    console.print(f"[green]✓[/green] Cron job installed: [bold]sync + remind[/bold] daily at [bold]{t}[/bold]")
+    console.print(f"[green]✓[/green] Cron job installed: [bold]sync + todo[/bold] daily at [bold]{t}[/bold]")
     console.print(f"[dim]Logs → {log}[/dim]")
 
 
@@ -732,174 +737,169 @@ def _parse_hard_stops(ranges: list[str]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# schedule
+# send
 # ---------------------------------------------------------------------------
 
-@cli.group()
-def schedule() -> None:
-    """Manually adjust schedule blocks (add, move, update, delete, clear).
-
-    Use 'canvas-manager plan' to view or auto-generate the day's study plan.
-    """
-    pass
-
-
-@schedule.command("add")
-@click.argument("title")
-@click.option("--from", "start", required=True, metavar="HH:MM", help="Start time.")
-@click.option("--to",   "end",   required=True, metavar="HH:MM", help="End time.")
-@click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "personal", "study", "other"]),
-              default="study", show_default=True)
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to add to (default: today).")
-def schedule_add(title: str, start: str, end: str, block_type: str,
-                 plan_date: datetime | None) -> None:
-    """Add a new block to a day's schedule."""
-    from .schedule import _generate_id
-    d = plan_date.date() if plan_date else date.today()
-    block: _sched.Block = {
-        "id": _generate_id(), "start": start, "end": end,
-        "title": title, "type": block_type, "source": "manual",
-    }
-    existing = _sched.load_plan(d)
-    existing.append(block)
-    _sched.save_plan(d, existing)
-    console.print(f"[green]✓[/green] Added block {block['id']} "
-                  f"({block['start']}–{block['end']} {block['title']}).")
-
-
-@schedule.command("move")
-@click.argument("block_id")
-@click.option("--from", "start", default=None, metavar="HH:MM", help="New start time.")
-@click.option("--to",   "end",   default=None, metavar="HH:MM", help="New end time.")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day of the block (default: today).")
-def schedule_move(block_id: str, start: str | None, end: str | None,
-                  plan_date: datetime | None) -> None:
-    """Move a block, preserving duration when only one bound is given."""
-    d = plan_date.date() if plan_date else date.today()
-    if start is None and end is None:
-        console.print("[red]Error: provide at least --from or --to.[/red]")
-        sys.exit(1)
-    try:
-        blocks = _sched.load_plan(d)
-        block = next((b for b in blocks if b["id"] == block_id), None)
-        if block is None:
-            raise KeyError(f"No block with id '{block_id}' on {d}")
-        if start is not None and end is not None:
-            new_start, new_end = start, end
-        elif end is not None:
-            dur = _hhmm_to_minutes(block["end"]) - _hhmm_to_minutes(block["start"])
-            new_start = _minutes_to_hhmm(_hhmm_to_minutes(end) - dur)
-            new_end = end
-        else:
-            dur = _hhmm_to_minutes(block["end"]) - _hhmm_to_minutes(block["start"])
-            new_start = start
-            new_end = _minutes_to_hhmm(_hhmm_to_minutes(start) + dur)
-        updated = _sched.update_block(d, block_id, {"start": new_start, "end": new_end})
-        console.print(f"[green]✓[/green] Moved {block_id} to {updated['start']}–{updated['end']}.")
-    except (ValueError, KeyError) as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
-
-
-@schedule.command("update")
-@click.argument("block_id")
-@click.option("--title", default=None, help="New title.")
-@click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "personal", "study", "other"]),
-              default=None, help="New block type.")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day of the block (default: today).")
-def schedule_update(block_id: str, title: str | None, block_type: str | None,
-                    plan_date: datetime | None) -> None:
-    """Update fields on an existing block."""
-    d = plan_date.date() if plan_date else date.today()
-    updates: dict = {}
-    if title is not None:
-        updates["title"] = title
-    if block_type is not None:
-        updates["type"] = block_type
-    if not updates:
-        console.print("[yellow]Nothing to update — provide --title or --type.[/yellow]")
-        return
-    try:
-        _sched.update_block(d, block_id, updates)
-        console.print(f"[green]✓[/green] Updated block {block_id}.")
-    except (ValueError, KeyError) as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
-
-
-@schedule.command("delete")
-@click.argument("block_id")
-@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day of the block (default: today).")
-def schedule_delete(block_id: str, yes: bool, plan_date: datetime | None) -> None:
-    """Delete a block from a day's schedule."""
-    d = plan_date.date() if plan_date else date.today()
-    if not yes:
-        click.confirm(f"Delete block {block_id}?", abort=True)
-    try:
-        _sched.delete_block(d, block_id)
-        console.print(f"[green]✓[/green] Deleted block {block_id}.")
-    except KeyError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        sys.exit(1)
-
-
-@schedule.command("clear")
-@click.option("--yes", is_flag=True, default=False, help="Skip confirmation.")
-@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None, help="Day to clear (default: today).")
-def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
-    """Delete all blocks for a day."""
-    d = plan_date.date() if plan_date else date.today()
-    blocks = _sched.load_plan(d)
-    n = len(blocks)
-    if n == 0:
-        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
-        return
-    if not yes:
-        click.confirm(f"Delete {n} blocks for {d}?", abort=True)
-    _sched.save_plan(d, [])
-    console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
-
-
-@schedule.command("send")
+@cli.command("send")
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day's schedule to send (default: today).")
-@click.option("--to-email", "to_email", default=None, help="Override recipient email.")
+@click.option("--email", "send_email", is_flag=True, default=False, help="Send email only.")
+@click.option("--sms",   "send_sms",   is_flag=True, default=False, help="Send SMS only.")
 @click.option("--preview", is_flag=True, default=False, help="Print without sending.")
-def schedule_send(plan_date: datetime | None, to_email: str | None, preview: bool) -> None:
-    """Email a day's schedule."""
+@click.option("--to-email", "to_email", default=None, help="Override recipient email.")
+def send(
+    plan_date: datetime | None,
+    send_email: bool,
+    send_sms: bool,
+    preview: bool,
+    to_email: str | None,
+) -> None:
+    """Send today's block schedule via email + SMS (default: both; use --email or --sms for one).
+
+    \b
+    Examples:
+      canvas-manager send
+      canvas-manager send --preview
+      canvas-manager send --email
+      canvas-manager send --date 2026-05-01
+    """
     d = plan_date.date() if plan_date else date.today()
     blocks = _sched.list_blocks(d)
     if not blocks:
-        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        console.print(f"[yellow]No blocks scheduled for {d}. Run 'plan' first.[/yellow]")
         return
+
+    counts = {t: sum(1 for b in blocks if b.get("type") == t)
+              for t in ("class", "assignment", "study", "personal", "other")}
+    summary_parts = []
+    if counts["class"]:
+        summary_parts.append(f"{counts['class']} class{'es' if counts['class'] != 1 else ''}")
+    if counts["assignment"]:
+        summary_parts.append(f"{counts['assignment']} assignment{'s' if counts['assignment'] != 1 else ''}")
+    if counts["study"]:
+        summary_parts.append(f"{counts['study']} study block{'s' if counts['study'] != 1 else ''}")
+    if counts["personal"]:
+        summary_parts.append(f"{counts['personal']} personal item{'s' if counts['personal'] != 1 else ''}")
+    if counts["other"]:
+        summary_parts.append(f"{counts['other']} other")
+    summary = ", ".join(summary_parts) or "0 blocks"
 
     plain, html = _render_schedule_email(d, blocks)
+    subject = f"Your schedule for {d} — {summary}"
 
     if preview:
-        console.print(f"\n[bold cyan]SCHEDULE EMAIL PREVIEW[/bold cyan]")
-        console.print(f"[bold]Subject:[/bold] Your schedule for {d}")
+        console.print(f"\n[bold cyan]SCHEDULE PREVIEW[/bold cyan]")
+        console.print(f"[bold]Subject:[/bold] {subject}")
         console.print(f"[dim]{'─'*60}[/dim]")
         console.print(plain)
-        console.print("\n[yellow]--preview mode: nothing sent.[/yellow]")
+        console.print(f"\n[dim]Summary: {summary}[/dim]")
+        console.print("\n[yellow]--preview: nothing sent.[/yellow]")
         return
 
-    email_cfg = get_email_config()
-    recipient = to_email or email_cfg["to_address"]
+    do_email = send_email or (not send_email and not send_sms)
+    do_sms   = send_sms   or (not send_email and not send_sms)
+
     notifier = Notifier()
-    console.print(f"[bold]Sending schedule email to {recipient}...[/bold]", end=" ")
-    try:
-        msg_id = notifier.send_email_raw(recipient, f"Your schedule for {d}", plain, html)
-        console.print(f"[green]Sent! ({msg_id})[/green]")
-    except Exception as e:
-        console.print(f"[red]Failed: {e}[/red]")
+    if do_email:
+        email_cfg = get_email_config()
+        recipient = to_email or email_cfg["to_address"]
+        console.print(f"[bold]Sending schedule email to {recipient}...[/bold]", end=" ")
+        try:
+            msg_id = notifier.send_email_raw(recipient, subject, plain, html)
+            console.print(f"[green]Sent! ({msg_id})[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed: {e}[/red]")
+    if do_sms:
+        sms_cfg = get_sms_config()
+        sms_text = _render_schedule_sms(d, blocks, summary)
+        console.print(f"[bold]Sending schedule SMS...[/bold]", end=" ")
+        try:
+            msg_id = notifier.send_sms_raw(sms_cfg["sms_email"], sms_text)
+            console.print(f"[green]Sent! ({msg_id})[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed: {e}[/red]")
+
+
+# ---------------------------------------------------------------------------
+# schedule
+# ---------------------------------------------------------------------------
+
+@cli.command("schedule")
+@click.argument("command_text")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day to modify (default: today).")
+@click.option("--preview", is_flag=True, default=False,
+              help="Show proposed changes without saving.")
+def schedule_cmd(command_text: str, plan_date: datetime | None, preview: bool) -> None:
+    """Modify today's schedule with a natural-language command (powered by Gemini).
+
+    \b
+    Examples:
+      canvas-manager schedule "add gym from 3pm to 4pm"
+      canvas-manager schedule "move the ML homework block to 2pm"
+      canvas-manager schedule "delete the study block"
+      canvas-manager schedule "clear everything after 6pm"
+    """
+    gemini_cfg = get_gemini_config()
+    if not gemini_cfg["api_key"]:
+        console.print("[red]Error: GEMINI_API_KEY is not set. Run 'canvas-manager setup' to configure Gemini.[/red]")
+        return
+
+    d = plan_date.date() if plan_date else date.today()
+    habits = _load_habits() or {}
+    current_blocks = _sched.list_blocks(d)
+
+    console.print("[dim]Parsing command...[/dim]", end=" ")
+    updated_blocks = parse_schedule_command(
+        command_text, d, current_blocks, habits,
+        gemini_cfg["api_key"], gemini_cfg["model"],
+    )
+    console.print("[green]done[/green]")
+
+    # Diff display
+    old_map = {b["id"]: b for b in current_blocks}
+    new_map = {b["id"]: b for b in updated_blocks}
+    changed = False
+    for bid, b in new_map.items():
+        if bid not in old_map:
+            console.print(f"[green]+[/green] Add: {b['start']}–{b['end']} {b['title']} [{b['type']}]")
+            changed = True
+    for bid, b in old_map.items():
+        if bid not in new_map:
+            console.print(f"[red]-[/red] Remove: {b['start']}–{b['end']} {b['title']}")
+            changed = True
+    for bid, b in new_map.items():
+        if bid in old_map and b != old_map[bid]:
+            old = old_map[bid]
+            console.print(
+                f"[yellow]~[/yellow] Update: {old['start']}–{old['end']} → "
+                f"{b['start']}–{b['end']} {b['title']}"
+            )
+            changed = True
+
+    if not changed:
+        console.print("[yellow]No changes detected.[/yellow]")
+        return
+
+    if preview:
+        console.print("\n[yellow]--preview: no changes saved.[/yellow]")
+        return
+
+    _sched.save_plan(d, updated_blocks)
+
+    all_deadlines = _load_cache()
+    console.print("[dim]Running Gemini schedule improvement...[/dim]", end=" ")
+    improved = gemini_improve(
+        d, updated_blocks, habits, all_deadlines,
+        gemini_cfg["api_key"], gemini_cfg["model"],
+    )
+    console.print("[green]done[/green]")
+    if improved != updated_blocks:
+        _sched.save_plan(d, improved)
+
+    final_blocks = _sched.list_blocks(d)
+    if final_blocks:
+        _print_schedule_table(d, final_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -1064,8 +1064,16 @@ def _hhmm_to_minutes(t: str) -> int:
     return h * 60 + m
 
 
-def _minutes_to_hhmm(mins: int) -> str:
-    return f"{mins // 60:02d}:{mins % 60:02d}"
+def _render_schedule_sms(d: date, blocks: list[dict], summary: str) -> str:
+    """Brief plain-text schedule for SMS (≤320 chars)."""
+    lines = [f"Schedule {d}: {summary}"]
+    for b in sorted(blocks, key=lambda x: x["start"]):
+        line = f"{b['start']}–{b['end']} {b['title'][:22]}"
+        if sum(len(ln) + 1 for ln in lines) + len(line) > 290:
+            lines.append("…more blocks — check email.")
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _export_blocks_to_ical(d: date, blocks: list[dict], out_path: Path) -> None:

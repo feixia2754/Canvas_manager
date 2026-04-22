@@ -14,7 +14,8 @@ Run: `canvas-manager <command>`
 
 ```
 canvas_manager/
-  main.py          — Click CLI; commands: setup, sync, list, remind, import-ical, setup-cron, habits, plan, schedule (add/move/update/delete/clear/send)
+  main.py          — Click CLI; commands: setup, sync, list, todo, send, import-ical, setup-cron, habits, plan, schedule (free-text Gemini)
+  gemini_client.py — Gemini AI functions: classify_events, estimate_durations, improve_schedule, parse_schedule_command
   config.py        — All env-var reads; single source of truth for configuration
   canvas_client.py — Canvas REST API (requests); returns normalized deadline dicts
   gcal_client.py   — Google Calendar API; returns normalized deadline dicts

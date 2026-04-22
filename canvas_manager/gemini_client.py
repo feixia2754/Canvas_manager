@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+import uuid
 from datetime import date
 
 from rich.console import Console
@@ -244,4 +245,90 @@ def improve_schedule(
         return sorted(block_map.values(), key=lambda b: b["start"])
     except Exception as exc:
         console.print(f"[yellow]  Gemini schedule improvement failed ({exc}) — keeping original.[/yellow]")
+        return blocks
+
+
+def parse_schedule_command(
+    text: str,
+    target_date: date,
+    blocks: list[dict],
+    habits: dict,
+    api_key: str,
+    model_name: str,
+) -> list[dict]:
+    """Apply a natural-language schedule command to the current block list.
+
+    Returns the updated block list. Source for new blocks is set to 'manual'.
+    Locked blocks (source='gcal') are never removed unless explicitly named.
+    Falls back to the original blocks (with a warning) if the call fails.
+    """
+    if not api_key:
+        console.print("[yellow]  Gemini API key not set — cannot parse free-text schedule commands.[/yellow]")
+        return blocks
+
+    import google.generativeai as genai
+
+    habits_summary = (
+        f"wake={habits.get('wake_time', '08:00')}  "
+        f"sleep={habits.get('sleep_time', '23:00')}  "
+        f"peak_focus={habits.get('peak_focus_hours', [])}"
+    )
+
+    blocks_json = json.dumps(
+        [
+            {
+                "id": b["id"],
+                "start": b["start"],
+                "end": b["end"],
+                "title": b["title"],
+                "type": b["type"],
+                "source": b.get("source", "manual"),
+            }
+            for b in blocks
+        ],
+        indent=2,
+    )
+
+    prompt = (
+        f"You are managing a student's daily schedule for {target_date}.\n"
+        f"Student habits: {habits_summary}\n\n"
+        f"Type definitions:\n{_TYPE_DESCRIPTIONS}\n\n"
+        f"Current blocks:\n{blocks_json}\n\n"
+        f'Command: "{text}"\n\n'
+        f"Apply the command exactly. Rules:\n"
+        f"1. Return ALL blocks that should remain (unchanged and modified).\n"
+        f'2. For new blocks, use source="manual" and id="new_<n>" (e.g. new_1).\n'
+        f"3. Preserve the original id for modified blocks.\n"
+        f"4. Times must be in HH:MM (24-hour) format.\n"
+        f"5. Type must be one of: {_VALID_TYPES}.\n"
+        f'6. Never remove or modify blocks with source="gcal" unless the command explicitly names them.\n\n'
+        f"Return a JSON array with fields: id, start, end, title, type, source."
+    )
+
+    try:
+        client = _get_client(api_key, model_name)
+        response = client.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0,
+            ),
+        )
+        result = json.loads(response.text)
+        if not isinstance(result, list):
+            return blocks
+
+        existing_ids = {b["id"] for b in blocks}
+        updated: list[dict] = []
+        for r in result:
+            if not isinstance(r, dict):
+                continue
+            bid = r.get("id", "")
+            if not bid or bid not in existing_ids:
+                r["id"] = str(uuid.uuid4())[:8]
+                r["source"] = "manual"
+            updated.append(r)
+        return updated
+    except Exception as exc:
+        console.print(f"[yellow]  Gemini schedule command failed ({exc}) — no changes made.[/yellow]")
         return blocks
