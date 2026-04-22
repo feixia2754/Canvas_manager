@@ -16,7 +16,7 @@ dependencies = [
     "google-auth-httplib2",
     "google-auth-oauthlib",
     "rich",
-    "google-generativeai",
+    "google-genai",
 ]
 
 [project.scripts]

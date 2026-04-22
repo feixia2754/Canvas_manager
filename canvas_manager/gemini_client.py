@@ -1,13 +1,14 @@
 """Gemini AI client for canvas-manager.
 
-Three public functions:
-  classify_events     — assign/correct type labels on deadline dicts
-  estimate_durations  — estimate how long each of today's tasks will take
-  improve_schedule    — review and improve a drafted day's block list
+Four public functions:
+  classify_events        — assign/correct type labels on deadline dicts
+  estimate_durations     — estimate how long each of today's tasks will take
+  improve_schedule       — review and improve a drafted day's block list
+  parse_schedule_command — apply a natural-language command to a block list
 
 All functions accept api_key and model_name explicitly so callers control
-which key/model is used. The underlying GenerativeModel is cached per
-(api_key, model_name) pair so it is created at most once per process.
+which key/model is used. The underlying Client is cached per api_key so it
+is created at most once per process.
 """
 
 from __future__ import annotations
@@ -33,11 +34,25 @@ _TYPE_DESCRIPTIONS = (
 
 
 @functools.lru_cache(maxsize=4)
-def _get_client(api_key: str, model_name: str):
-    """Return a cached GenerativeModel for the given key and model."""
-    import google.generativeai as genai
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(model_name)
+def _get_client(api_key: str):
+    """Return a cached Gemini Client for the given api_key."""
+    from google import genai
+    return genai.Client(api_key=api_key)
+
+
+def _generate(api_key: str, model_name: str, prompt: str) -> str:
+    """Call Gemini with JSON output mode and return the response text."""
+    from google.genai import types
+    client = _get_client(api_key)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0,
+        ),
+    )
+    return response.text
 
 
 def classify_events(
@@ -56,8 +71,6 @@ def classify_events(
     if not events:
         return events
 
-    import google.generativeai as genai
-
     items_text = "\n".join(
         f"{i}: name={e['name']!r} course={e.get('course', '')!r} source={e.get('source', '')!r}"
         for i, e in enumerate(events)
@@ -73,15 +86,7 @@ def classify_events(
     )
 
     try:
-        client = _get_client(api_key, model_name)
-        response = client.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-        results = json.loads(response.text)
+        results = json.loads(_generate(api_key, model_name, prompt))
         updated = [dict(e) for e in events]
         for r in results:
             idx = r.get("index")
@@ -114,8 +119,6 @@ def estimate_durations(
     if not events:
         return events
 
-    import google.generativeai as genai
-
     items_text = "\n".join(
         f"{i}: name={e['name']!r} course={e.get('course', '')!r} type={e.get('type', '')!r}"
         for i, e in enumerate(events)
@@ -131,15 +134,7 @@ def estimate_durations(
     )
 
     try:
-        client = _get_client(api_key, model_name)
-        response = client.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-        results = json.loads(response.text)
+        results = json.loads(_generate(api_key, model_name, prompt))
         updated = [dict(e) for e in events]
         for r in results:
             idx = r.get("index")
@@ -173,8 +168,6 @@ def improve_schedule(
         return blocks
     if not blocks:
         return blocks
-
-    import google.generativeai as genai
 
     locked_ids = {b["id"] for b in blocks if b.get("source") in ("manual", "gcal")}
 
@@ -220,15 +213,7 @@ def improve_schedule(
     )
 
     try:
-        client = _get_client(api_key, model_name)
-        response = client.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-        result = json.loads(response.text)
+        result = json.loads(_generate(api_key, model_name, prompt))
         block_map = {b["id"]: dict(b) for b in blocks}
         for r in result:
             bid = r.get("id")
@@ -265,8 +250,6 @@ def parse_schedule_command(
     if not api_key:
         console.print("[yellow]  Gemini API key not set — cannot parse free-text schedule commands.[/yellow]")
         return blocks
-
-    import google.generativeai as genai
 
     habits_summary = (
         f"wake={habits.get('wake_time', '08:00')}  "
@@ -306,15 +289,7 @@ def parse_schedule_command(
     )
 
     try:
-        client = _get_client(api_key, model_name)
-        response = client.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-        result = json.loads(response.text)
+        result = json.loads(_generate(api_key, model_name, prompt))
         if not isinstance(result, list):
             return blocks
 
