@@ -20,7 +20,7 @@ from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
 from .notifier import Notifier, get_credentials
 from . import schedule as _sched
-from .scheduler import generate_plan
+from .scheduler import generate_plan, DEFAULT_HABITS as _DEFAULT_HABITS
 
 console = Console()
 # Store cache in the project root so it's always found regardless of cwd
@@ -846,7 +846,7 @@ def schedule_cmd(command_text: str, plan_date: datetime | None, preview: bool) -
         return
 
     d = plan_date.date() if plan_date else date.today()
-    habits = _load_habits() or {}
+    habits = _load_habits() or dict(_DEFAULT_HABITS)
     current_blocks = _sched.list_blocks(d)
 
     console.print("[dim]Parsing command...[/dim]", end=" ")
@@ -931,7 +931,7 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
       canvas-manager plan --export
     """
     d = plan_date.date() if plan_date else date.today()
-    habits = _load_habits() or {}
+    habits = _load_habits() or dict(_DEFAULT_HABITS)
     gemini_cfg = get_gemini_config()
 
     # --- Gemini call 1: estimate durations for today's flexible deadlines ---
