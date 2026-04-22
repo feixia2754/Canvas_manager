@@ -13,7 +13,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
-from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config, get_gcal_config
+from .config import get_canvas_config, get_email_config, get_sms_config, get_reminder_config, get_gcal_config, get_gemini_config
+from .gemini_client import classify_events, estimate_durations, improve_schedule as gemini_improve
 from .canvas_client import CanvasClient, parse_due_date
 from .gcal_client import GCalClient
 from .ical_parser import parse_ical, merge_with_canvas
@@ -40,8 +41,7 @@ def cli() -> None:
 
 @cli.command()
 def setup() -> None:
-    """Interactive setup: configure .env and install the daily cron job."""
-    from shutil import which
+    """Interactive setup: configure .env with Canvas, email, SMS, and GCal credentials."""
     from .config import CARRIER_GATEWAYS
 
     env_path = Path(__file__).parent.parent / ".env"
@@ -215,7 +215,12 @@ def setup() -> None:
         default=existing.get("REMINDER_LOOKAHEAD_DAYS", "3"),
     )
 
-    hour, minute = map(int, reminder_time.split(":"))
+    console.print("\n[bold]Gemini AI[/bold] [dim](optional — powers smart classification and schedule improvement)[/dim]")
+    gemini_key = Prompt.ask(
+        "  Gemini API key (leave blank to skip)",
+        default=existing.get("GEMINI_API_KEY", ""),
+        password=True,
+    ).strip()
 
     # Write .env
     env_content = f"""CANVAS_BASE_URL={canvas_url}
@@ -232,32 +237,19 @@ REMINDER_TIME={reminder_time}
 
 GCAL_CALENDAR_ID={gcal_id}
 GCAL_DAYS_AHEAD=30
+
+GEMINI_API_KEY={gemini_key}
+GEMINI_MODEL=gemini-2.0-flash-lite
 """
     env_path.write_text(env_content)
     console.print(f"\n[green]✓[/green] Saved config to [dim]{env_path}[/dim]")
 
-    # Update crontab
-    if Confirm.ask("\n  Install daily cron job?", default=True):
-        import subprocess
-        bin_path = which("canvas-manager") or "canvas-manager"
-        log = Path.home() / ".canvas_manager.log"
-        cron_line = f"{minute} {hour} * * * {bin_path} sync && {bin_path} remind >> {log} 2>&1"
-
-        # Remove any existing canvas-manager daily entry and add the new one
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        existing_cron = result.stdout if result.returncode == 0 else ""
-        new_cron = "\n".join(
-            line for line in existing_cron.splitlines()
-            if "canvas-manager" not in line or line.strip().endswith("10 4 *")
-        )
-        new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
-        subprocess.run(["crontab", "-"], input=new_cron, text=True)
-        console.print(f"[green]✓[/green] Cron job set for [bold]{reminder_time}[/bold] daily")
-
     console.print("\n[bold]Next steps:[/bold]")
-    console.print("  1. Run [cyan]canvas-manager sync[/cyan] to fetch your first deadlines")
-    console.print("  2. Run [cyan]canvas-manager remind --preview[/cyan] to preview your reminder")
-    console.print("  3. Run [cyan]canvas-manager remind[/cyan] to send it now\n")
+    console.print("  1. Run [cyan]canvas-manager habits[/cyan] to set your schedule preferences")
+    console.print("  2. Run [cyan]canvas-manager sync[/cyan] to fetch your first deadlines")
+    console.print("  3. Run [cyan]canvas-manager plan[/cyan] to generate today's schedule")
+    console.print("  4. Run [cyan]canvas-manager setup-cron[/cyan] to install daily automated reminders")
+    console.print("  5. Run [cyan]canvas-manager remind --preview[/cyan] to preview a reminder\n")
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +288,21 @@ def import_ical(ical_file: str | None) -> None:
     console.print(f"[green]done ({len(canvas_assignments)} found)[/green]")
 
     merged = merge_with_canvas(ical_deadlines, canvas_assignments)
+
+    # Preserve gcal items from existing cache — only replace canvas/ical data
+    existing = _load_cache()
+    from .ical_parser import _similar
+    tolerance = timedelta(hours=2)
+    for g in existing:
+        if g.get("source") == "gcal":
+            is_dup = any(
+                _similar(g["name"], m["name"]) and abs(g["due_at"] - m["due_at"]) <= tolerance
+                for m in merged
+            )
+            if not is_dup:
+                merged.append(g)
+
+    merged.sort(key=lambda d: d["due_at"])
     console.print(f"  Merged total: [bold]{len(merged)}[/bold] unique deadline(s).\n")
 
     for d in merged:
@@ -303,7 +310,7 @@ def import_ical(ical_file: str | None) -> None:
         d.pop("recurrence", None)
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
-    console.print(f"\n[dim]Saved. Run [bold]canvas-manager remind[/bold] to send notifications.[/dim]")
+    console.print(f"\n[dim]Saved. Run [bold]canvas-manager list[/bold] to view or [bold]canvas-manager remind[/bold] to send notifications.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +369,23 @@ def sync(skip_gcal: bool) -> None:
         except Exception as e:
             console.print(f"[yellow]skipped (error: {e})[/yellow]")
 
+    # Preserve ical/manual items — only replace canvas/gcal data
+    existing = _load_cache()
+    preserved = [d for d in existing if d.get("source") not in ("canvas", "gcal")]
+    deadlines.extend(preserved)
     deadlines.sort(key=lambda d: d["due_at"])
     for d in deadlines:
         d["type"] = _classify(d)
         d.pop("recurrence", None)
-    _print_table(deadlines, title="Upcoming Deadlines (Canvas + Google Calendar)")
+
+    gemini_cfg = get_gemini_config()
+    console.print("[dim]Running Gemini classification...[/dim]", end=" ")
+    deadlines = classify_events(deadlines, gemini_cfg["api_key"], gemini_cfg["model"])
+    if gemini_cfg["api_key"]:
+        console.print("[green]done[/green]")
+
     _save_cache(deadlines)
-    console.print(f"\n[dim]Saved {len(deadlines)} deadline(s).[/dim]")
+    console.print(f"[green]✓[/green] Saved {len(deadlines)} deadline(s). Run [cyan]canvas-manager list[/cyan] to view.")
 
 
 # ---------------------------------------------------------------------------
@@ -389,16 +406,20 @@ def list_deadlines(days: int) -> None:
         [d for d in deadlines if now <= d["due_at"] <= cutoff],
         key=lambda d: d["due_at"],
     )
-    assignments = [d for d in upcoming if d.get("type") == "assignment"]
-    events = [d for d in upcoming if d.get("type") != "assignment"]
+    assignments = [d for d in upcoming if d.get("type") in ("assignment", "study")]
+    classes     = [d for d in upcoming if d.get("type") == "class"]
+    personal    = [d for d in upcoming if d.get("type") in ("personal", "other")]
+
     if assignments:
-        _print_table(assignments, title=f"Assignments — next {days} days")
+        _print_table(assignments, title=f"Assignments & Study — next {days} days")
     else:
         console.print(f"[dim]No assignments in the next {days} days.[/dim]")
-    if events:
-        _print_table(events, title=f"Classes & Events — next {days} days")
+    if classes:
+        _print_table(classes, title=f"Classes — next {days} days")
     else:
-        console.print(f"[dim]No classes or other events in the next {days} days.[/dim]")
+        console.print(f"[dim]No classes in the next {days} days.[/dim]")
+    if personal:
+        _print_table(personal, title=f"Personal & Other — next {days} days")
 
 
 # ---------------------------------------------------------------------------
@@ -415,19 +436,12 @@ def list_deadlines(days: int) -> None:
               help="Print messages without sending. Related: --email-only, --sms-only.")
 @click.option("--to-email", "to_email", default=None,
               help="Override recipient email address. Related: --email-only.")
-@click.option("--schedule", "include_schedule", is_flag=True, default=False,
-              help="Append the day's schedule to the email. Related: --schedule-date.")
-@click.option("--schedule-date", "schedule_date", type=click.DateTime(formats=["%Y-%m-%d"]),
-              default=None,
-              help="Which day's schedule to include (default: today). Requires --schedule.")
 def remind(
     days: int | None,
     email_only: bool,
     sms_only: bool,
     preview: bool,
     to_email: str | None,
-    include_schedule: bool,
-    schedule_date,
 ) -> None:
     """
     Send email and/or SMS reminders with upcoming deadlines.
@@ -496,24 +510,6 @@ def remind(
         except Exception as e:
             console.print(f"[red]Failed: {e}[/red]")
 
-    if include_schedule and send_email:
-        sched_day = schedule_date.date() if schedule_date else date.today()
-        blocks = _sched.list_blocks(sched_day)
-        if not blocks:
-            console.print(f"[yellow]No schedule blocks found for {sched_day}.[/yellow]")
-        else:
-            email_cfg = get_email_config()
-            recipient = to_email or email_cfg["to_address"]
-            plain, html = _render_schedule_email(sched_day, blocks)
-            console.print(f"[bold]Sending schedule email to {recipient}...[/bold]", end=" ")
-            try:
-                msg_id = notifier.send_email_raw(
-                    recipient, f"Your schedule for {sched_day}", plain, html
-                )
-                console.print(f"[green]Sent! ({msg_id})[/green]")
-            except Exception as e:
-                console.print(f"[red]Failed: {e}[/red]")
-
 
 # ---------------------------------------------------------------------------
 # setup-cron
@@ -522,8 +518,9 @@ def remind(
 @cli.command("setup-cron")
 @click.option("--time", "reminder_time", default=None, help="Send time HH:MM (24h).")
 def setup_cron(reminder_time: str | None) -> None:
-    """Print a crontab line for daily automatic reminders."""
+    """Install (or reinstall) the daily sync + remind cron job."""
     from shutil import which
+    import subprocess
 
     reminder_cfg = get_reminder_config()
     t = reminder_time or reminder_cfg["reminder_time"]
@@ -537,8 +534,15 @@ def setup_cron(reminder_time: str | None) -> None:
     log = Path.home() / ".canvas_manager.log"
     cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} remind >> {log} 2>&1"
 
-    console.print("[bold]Add this to your crontab ([bold]crontab -e[/bold]):[/bold]\n")
-    console.print(f"  [cyan]{cron_line}[/cyan]\n")
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    existing_cron = result.stdout if result.returncode == 0 else ""
+    new_cron = "\n".join(
+        line for line in existing_cron.splitlines()
+        if "canvas-manager" not in line
+    )
+    new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
+    subprocess.run(["crontab", "-"], input=new_cron, text=True)
+    console.print(f"[green]✓[/green] Cron job installed: [bold]sync + remind[/bold] daily at [bold]{t}[/bold]")
     console.print(f"[dim]Logs → {log}[/dim]")
 
 
@@ -625,25 +629,59 @@ def habits() -> None:
             except (ValueError, AssertionError):
                 console.print("[red]  Enter comma-separated ranges like 09:00-11:00, 14:00-16:00.[/red]")
 
+    _VALID_TYPES = ["class", "assignment", "personal", "study", "other"]
+    _DEFAULT_PRIORITY = ["class", "assignment", "personal", "study", "other"]
+
+    def ask_priority(prompt: str, default: list[str]) -> list[str]:
+        default_str = ", ".join(default)
+        while True:
+            val = Prompt.ask(prompt, default=default_str).strip()
+            parts = [p.strip().lower() for p in val.split(",") if p.strip()]
+            if sorted(parts) == sorted(_VALID_TYPES):
+                return parts
+            console.print(f"[red]  Must include all 5 types exactly once: {', '.join(_VALID_TYPES)}[/red]")
+
     d = existing or {}
 
-    # hard_stops stored as [{"start": "HH:MM", "end": "HH:MM"}]; display as ranges for the prompt
     existing_stops_str = ", ".join(
         f"{s['start']}-{s['end']}" for s in d.get("hard_stops", [])
     ) or "none"
 
+    console.print("\n[bold]Schedule[/bold]")
+    wake_time               = ask_time(    "  Wake time",                        d.get("wake_time", "07:00"))
+    sleep_time              = ask_time(    "  Sleep time",                       d.get("sleep_time", "23:00"))
+    peak_focus_hours        = ask_range_list("  Peak focus hours (e.g. 09:00-11:00, 14:00-16:00)", ", ".join(d.get("peak_focus_hours", ["09:00-11:00"])))
+    preferred_block_minutes = ask_minutes( "  Preferred focus block (minutes)",  d.get("preferred_block_minutes", 90))
+    break_minutes           = ask_minutes( "  Break between blocks (minutes)",   d.get("break_minutes", 15))
+    hard_stops              = _parse_hard_stops(
+                                  ask_range_list(
+                                      "  Hard-stop ranges (e.g. 12:00-13:00, 18:00-19:00) — or 'none'",
+                                      existing_stops_str if existing_stops_str != "none" else "",
+                                  )
+                              )
+
+    console.print("\n[bold]Priority[/bold] [dim](highest → lowest; controls which blocks get peak hours and earliest slots)[/dim]")
+    priority_order = ask_priority(
+        "  Priority order",
+        d.get("priority_order", _DEFAULT_PRIORITY),
+    )
+
+    console.print("\n[bold]Exam & Quiz prep[/bold]")
+    exam_prep_days_before   = ask_minutes( "  Start studying N days before exam",       d.get("exam_prep_days_before", 2))
+    exam_prep_blocks_per_day= ask_minutes( "  Study blocks per day (X)",                d.get("exam_prep_blocks_per_day", 2))
+    exam_prep_block_minutes = ask_minutes( "  Minutes per study block (Y)",             d.get("exam_prep_block_minutes", 60))
+
     profile = {
-        "wake_time":              ask_time(      "  Wake time",                         d.get("wake_time", "07:00")),
-        "sleep_time":             ask_time(      "  Sleep time",                        d.get("sleep_time", "23:00")),
-        "peak_focus_hours":       ask_range_list("  Peak focus hours (e.g. 09:00-11:00, 14:00-16:00)", ", ".join(d.get("peak_focus_hours", ["09:00-11:00"]))),
-        "preferred_block_minutes":ask_minutes(   "  Preferred focus block (minutes)",   d.get("preferred_block_minutes", 90)),
-        "break_minutes":          ask_minutes(   "  Break between blocks (minutes)",    d.get("break_minutes", 15)),
-        "hard_stops":             _parse_hard_stops(
-                                      ask_range_list(
-                                          "  Hard-stop ranges (e.g. 12:00-13:00, 18:00-19:00) — or 'none'",
-                                          existing_stops_str if existing_stops_str != "none" else "",
-                                      )
-                                  ),
+        "wake_time":               wake_time,
+        "sleep_time":              sleep_time,
+        "peak_focus_hours":        peak_focus_hours,
+        "preferred_block_minutes": preferred_block_minutes,
+        "break_minutes":           break_minutes,
+        "hard_stops":              hard_stops,
+        "priority_order":          priority_order,
+        "exam_prep_days_before":   exam_prep_days_before,
+        "exam_prep_blocks_per_day":exam_prep_blocks_per_day,
+        "exam_prep_block_minutes": exam_prep_block_minutes,
     }
 
     HABITS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -668,12 +706,18 @@ def _print_habits(profile: dict) -> None:
     hard_stops_str = ", ".join(
         f"{s['start']}–{s['end']}" for s in profile.get("hard_stops", [])
     ) or "none"
-    table.add_row("Wake time",        profile.get("wake_time", "—"))
-    table.add_row("Sleep time",       profile.get("sleep_time", "—"))
-    table.add_row("Peak focus hours", ", ".join(profile.get("peak_focus_hours", [])))
-    table.add_row("Focus block",      f"{profile.get('preferred_block_minutes', '—')} min")
-    table.add_row("Break between blocks", f"{profile.get('break_minutes', '—')} min")
-    table.add_row("Hard stops",       hard_stops_str)
+    default_priority = ["class", "assignment", "personal", "study", "other"]
+    priority_str = " > ".join(profile.get("priority_order", default_priority))
+    table.add_row("Wake time",             profile.get("wake_time", "—"))
+    table.add_row("Sleep time",            profile.get("sleep_time", "—"))
+    table.add_row("Peak focus hours",      ", ".join(profile.get("peak_focus_hours", [])))
+    table.add_row("Focus block",           f"{profile.get('preferred_block_minutes', '—')} min")
+    table.add_row("Break between blocks",  f"{profile.get('break_minutes', '—')} min")
+    table.add_row("Hard stops",            hard_stops_str)
+    table.add_row("Priority order",        priority_str)
+    table.add_row("Exam prep — days before",      str(profile.get("exam_prep_days_before", 2)))
+    table.add_row("Exam prep — blocks/day (X)",   str(profile.get("exam_prep_blocks_per_day", 2)))
+    table.add_row("Exam prep — min/block (Y)",    str(profile.get("exam_prep_block_minutes", 60)))
     console.print(table)
 
 
@@ -705,7 +749,7 @@ def schedule() -> None:
 @click.option("--from", "start", required=True, metavar="HH:MM", help="Start time.")
 @click.option("--to",   "end",   required=True, metavar="HH:MM", help="End time.")
 @click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "study", "break", "personal", "other"]),
+              type=click.Choice(["class", "assignment", "personal", "study", "other"]),
               default="study", show_default=True)
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day to add to (default: today).")
@@ -764,7 +808,7 @@ def schedule_move(block_id: str, start: str | None, end: str | None,
 @click.argument("block_id")
 @click.option("--title", default=None, help="New title.")
 @click.option("--type", "block_type",
-              type=click.Choice(["class", "assignment", "study", "break", "personal", "other"]),
+              type=click.Choice(["class", "assignment", "personal", "study", "other"]),
               default=None, help="New block type.")
 @click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
               default=None, help="Day of the block (default: today).")
@@ -824,6 +868,40 @@ def schedule_clear(yes: bool, plan_date: datetime | None) -> None:
     console.print(f"[green]✓[/green] Cleared {n} block(s) for {d}.")
 
 
+@schedule.command("send")
+@click.option("--date", "plan_date", type=click.DateTime(formats=["%Y-%m-%d"]),
+              default=None, help="Day's schedule to send (default: today).")
+@click.option("--to-email", "to_email", default=None, help="Override recipient email.")
+@click.option("--preview", is_flag=True, default=False, help="Print without sending.")
+def schedule_send(plan_date: datetime | None, to_email: str | None, preview: bool) -> None:
+    """Email a day's schedule."""
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+    if not blocks:
+        console.print(f"[yellow]No blocks scheduled for {d}.[/yellow]")
+        return
+
+    plain, html = _render_schedule_email(d, blocks)
+
+    if preview:
+        console.print(f"\n[bold cyan]SCHEDULE EMAIL PREVIEW[/bold cyan]")
+        console.print(f"[bold]Subject:[/bold] Your schedule for {d}")
+        console.print(f"[dim]{'─'*60}[/dim]")
+        console.print(plain)
+        console.print("\n[yellow]--preview mode: nothing sent.[/yellow]")
+        return
+
+    email_cfg = get_email_config()
+    recipient = to_email or email_cfg["to_address"]
+    notifier = Notifier()
+    console.print(f"[bold]Sending schedule email to {recipient}...[/bold]", end=" ")
+    try:
+        msg_id = notifier.send_email_raw(recipient, f"Your schedule for {d}", plain, html)
+        console.print(f"[green]Sent! ({msg_id})[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed: {e}[/red]")
+
+
 # ---------------------------------------------------------------------------
 # plan
 # ---------------------------------------------------------------------------
@@ -853,7 +931,33 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
       canvas-manager plan --export
     """
     d = plan_date.date() if plan_date else date.today()
-    result = generate_plan(d, overwrite=overwrite)
+    habits = _load_habits() or {}
+    gemini_cfg = get_gemini_config()
+
+    # --- Gemini call 1: estimate durations for today's flexible deadlines ---
+    all_deadlines = _load_cache()
+    today_flexible = [
+        dl for dl in all_deadlines
+        if not dl.get("submitted")
+        and not dl.get("start_at")
+        and dl.get("source") != "gcal"
+        and dl["due_at"].astimezone().date() >= d
+    ]
+    if today_flexible:
+        console.print("[dim]Estimating task durations...[/dim]", end=" ")
+        today_flexible = estimate_durations(today_flexible, habits, gemini_cfg["api_key"], gemini_cfg["model"])
+        if gemini_cfg["api_key"]:
+            console.print("[green]done[/green]")
+        duration_map = {e["name"]: e["duration_minutes"] for e in today_flexible}
+        enriched_deadlines = [
+            {**dl, "duration_minutes": duration_map[dl["name"]]} if dl["name"] in duration_map else dl
+            for dl in all_deadlines
+        ]
+    else:
+        enriched_deadlines = all_deadlines
+
+    # --- Rule-based scheduling with enriched durations ---
+    result = generate_plan(d, overwrite=overwrite, deadline_overrides=enriched_deadlines)
 
     habits_note = (
         "[dim]Using custom habits.[/dim]"
@@ -862,7 +966,6 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
     )
     console.print(habits_note)
 
-    # Generation summary line
     if result["blocks"]:
         console.print(f"[green]✓[/green] Placed {len(result['blocks'])} new block(s).")
     elif result["existing_blocks"] and not result["skipped"]:
@@ -871,12 +974,19 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
         console.print("[green]No more work today![/green]")
 
     if result["skipped"]:
-        console.print(
-            f"[yellow]Could not fit:[/yellow] {', '.join(result['skipped'])}"
-        )
+        console.print(f"[yellow]Could not fit:[/yellow] {', '.join(result['skipped'])}")
 
-    # Always show the full schedule for the day
+    # --- Gemini call 2: improve the drafted schedule ---
     all_blocks = _sched.list_blocks(d)
+    if all_blocks:
+        console.print("[dim]Running Gemini schedule improvement...[/dim]", end=" ")
+        improved = gemini_improve(d, all_blocks, habits, all_deadlines, gemini_cfg["api_key"], gemini_cfg["model"])
+        if gemini_cfg["api_key"]:
+            console.print("[green]done[/green]")
+        if improved != all_blocks:
+            _sched.save_plan(d, improved)
+            all_blocks = _sched.list_blocks(d)
+
     if all_blocks:
         _print_schedule_table(d, all_blocks)
     else:
@@ -891,14 +1001,19 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
 # Helpers
 # ---------------------------------------------------------------------------
 
+_EXAM_KEYWORDS = {"quiz", "exam", "test", "midterm", "final"}
+
 def _classify(d: dict) -> str:
     if d["source"] == "canvas":
         return "assignment"
     if d["source"] == "gcal":
+        words = set(d.get("name", "").lower().split())
+        if words & _EXAM_KEYWORDS:
+            return "assignment"
         return "class"
-    if d["source"] == "manual":
+    if d["source"] in ("manual", "ical"):
         return "personal"
-    return "study"
+    return "other"
 
 
 def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
@@ -932,7 +1047,13 @@ def _print_table(deadlines: list[dict], title: str = "Deadlines") -> None:
             in_str = f"{days_left}d"
         submitted = "[green]✓ submitted[/green]" if d.get("submitted") else ("[red]✗ not submitted[/red]" if d.get("source") == "canvas" else "")
         dtype = d.get("type", "")
-        type_str = {"class": "[blue]class[/blue]", "assignment": "[magenta]assignment[/magenta]"}.get(dtype, "[dim]other[/dim]")
+        type_str = {
+            "class":      "[blue]class[/blue]",
+            "assignment": "[magenta]assignment[/magenta]",
+            "personal":   "[cyan]personal[/cyan]",
+            "study":      "[green]study[/green]",
+            "other":      "[dim]other[/dim]",
+        }.get(dtype, "[dim]other[/dim]")
         table.add_row(str(i), d["name"][:45], d.get("course", "")[:20], due_str, in_str, d.get("source", ""), type_str, submitted)
 
     console.print(table)
@@ -999,9 +1120,9 @@ def _print_schedule_table(d: date, blocks: list[dict]) -> None:
     _TYPE_STYLE = {
         "class":      "[blue]class[/blue]",
         "assignment": "[magenta]assignment[/magenta]",
-        "study":      "[green]study[/green]",
         "personal":   "[cyan]personal[/cyan]",
-        "break":      "[yellow]break[/yellow]",
+        "study":      "[green]study[/green]",
+        "other":      "[dim]other[/dim]",
     }
     for group in _group_overlapping(blocks):
         for idx, b in enumerate(group):
@@ -1014,8 +1135,13 @@ def _print_schedule_table(d: date, blocks: list[dict]) -> None:
 
 def _render_schedule_email(d: date, blocks: list[dict]) -> tuple[str, str]:
     """Return (plain_text, html) for a day's schedule."""
-    _TYPE_COLOR = {"class": "#3B82F6", "study": "#22C55E",
-                   "break": "#EAB308", "assignment": "#A855F7"}
+    _TYPE_COLOR = {
+        "class":      "#3B82F6",
+        "assignment": "#A855F7",
+        "personal":   "#06B6D4",
+        "study":      "#22C55E",
+        "other":      "#6B7280",
+    }
 
     # plain text
     lines = [f"Your schedule for {d}", "=" * 40]

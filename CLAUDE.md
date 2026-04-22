@@ -14,7 +14,7 @@ Run: `canvas-manager <command>`
 
 ```
 canvas_manager/
-  main.py          — Click CLI; commands: setup, sync, list, remind, import-ical, setup-cron
+  main.py          — Click CLI; commands: setup, sync, list, remind, import-ical, setup-cron, habits, plan, schedule (add/move/update/delete/clear/send)
   config.py        — All env-var reads; single source of truth for configuration
   canvas_client.py — Canvas REST API (requests); returns normalized deadline dicts
   gcal_client.py   — Google Calendar API; returns normalized deadline dicts
@@ -35,7 +35,7 @@ Every source (Canvas, GCal, iCal) normalizes to this exact shape before any proc
     "url":       str,       # canonical link
     "source":    str,       # "canvas" | "gcal" | "ical"
     "submitted": bool,      # always present; False for non-Canvas sources
-    "type":      str,       # "assignment" | "class" | "other" — set by _classify() in main.py
+    "type":      str,       # "class" | "assignment" | "personal" | "study" | "other" — set by _classify() or Gemini
 }
 ```
 
@@ -81,6 +81,7 @@ Never add ad-hoc keys to this dict without updating every consumer.
 - Every command gets its own `@cli.command()` function in `main.py`.
 - Use `rich` for all terminal output (tables, colored text). Never use bare `print` for user-facing output.
 - `--preview` flags must never make network calls or mutate state.
+- **Before adding a new command or flag**, read all existing commands in `main.py` and check for overlap. If overlap exists, decide: merge into the existing command if they share a clear single responsibility, or keep separate only if the actions are genuinely distinct. Never split one logical action across two commands, and never bundle two unrelated actions into one command behind a flag.
 
 ### Notifications
 - Build email as both HTML and `text/plain` parts.
@@ -90,6 +91,15 @@ Never add ad-hoc keys to this dict without updating every consumer.
 - Use `click.testing.CliRunner` for CLI integration tests.
 - Use a seeded JSON cache fixture instead of live API calls in tests.
 - Skip live crontab tests in CI via `pytest.mark.skipif(os.getenv("CI"))`.
+
+---
+
+## Collaboration style
+
+- **Always** present a task list before starting any multi-step work and ask for permission before proceeding.
+- **Always** ask for permission before moving to the next task or group of tasks.
+- **Stop and ask** whenever something is conflicting, ambiguous, or requires a design decision — never assume.
+- **Never** silently make design choices that affect behavior; surface them first.
 
 ---
 

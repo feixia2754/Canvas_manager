@@ -100,3 +100,10 @@ def get_reminder_config() -> dict:
         "lookahead_days": int(os.getenv("REMINDER_LOOKAHEAD_DAYS", "3")),
         "reminder_time": os.getenv("REMINDER_TIME", "08:00"),
     }
+
+
+def get_gemini_config() -> dict:
+    return {
+        "api_key": os.getenv("GEMINI_API_KEY", ""),
+        "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
+    }

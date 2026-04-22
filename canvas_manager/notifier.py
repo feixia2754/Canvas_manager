@@ -144,8 +144,9 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
         html = f"<p>{plain}</p>"
         return subject, html, plain
 
-    assignments = [d for d in upcoming if d.get("type") == "assignment"]
-    events = [d for d in upcoming if d.get("type") != "assignment"]
+    assignments = [d for d in upcoming if d.get("type") in ("assignment", "study")]
+    classes     = [d for d in upcoming if d.get("type") == "class"]
+    personal    = [d for d in upcoming if d.get("type") in ("personal", "other")]
 
     due_today = [d for d in upcoming if (d["due_at"].astimezone().date() - now.astimezone().date()).days == 0]
     subject = (
@@ -156,18 +157,23 @@ def _build_email(deadlines: list[dict], lookahead_days: int) -> tuple[str, str, 
 
     plain_lines = [f"Canvas Reminder — {today_str}", "=" * 40, ""]
     if assignments:
-        plain_lines += ["ASSIGNMENTS", "-" * 11, ""]
+        plain_lines += ["ASSIGNMENTS & STUDY", "-" * 19, ""]
         plain_lines += _plain_rows(assignments, now)
-    if events:
-        plain_lines += ["CLASSES & EVENTS", "-" * 16, ""]
-        plain_lines += _plain_rows(events, now)
+    if classes:
+        plain_lines += ["CLASSES", "-" * 7, ""]
+        plain_lines += _plain_rows(classes, now)
+    if personal:
+        plain_lines += ["PERSONAL & OTHER", "-" * 16, ""]
+        plain_lines += _plain_rows(personal, now)
     plain = "\n".join(plain_lines)
 
     sections_html = ""
     if assignments:
-        sections_html += _html_section("Assignments", assignments, now)
-    if events:
-        sections_html += _html_section("Classes &amp; Events", events, now)
+        sections_html += _html_section("Assignments &amp; Study", assignments, now)
+    if classes:
+        sections_html += _html_section("Classes", classes, now)
+    if personal:
+        sections_html += _html_section("Personal &amp; Other", personal, now)
 
     html = f"""<!DOCTYPE html>
 <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;color:#333;">
@@ -241,15 +247,18 @@ def _build_sms(deadlines: list[dict], lookahead_days: int) -> str:
     if not upcoming:
         return f"Canvas: nothing due in {lookahead_days}d. Check email for details."
 
-    assignments = [d for d in upcoming if d.get("type") == "assignment"]
-    events = [d for d in upcoming if d.get("type") != "assignment"]
-    due_today = [d for d in upcoming if d["due_at"].astimezone().date() == today]
+    assignments = [d for d in upcoming if d.get("type") in ("assignment", "study")]
+    classes     = [d for d in upcoming if d.get("type") == "class"]
+    personal    = [d for d in upcoming if d.get("type") in ("personal", "other")]
+    due_today   = [d for d in upcoming if d["due_at"].astimezone().date() == today]
 
     parts = []
     if assignments:
         parts.append(f"{len(assignments)} assignment{'s' if len(assignments) != 1 else ''}")
-    if events:
-        parts.append(f"{len(events)} class/event{'s' if len(events) != 1 else ''}")
+    if classes:
+        parts.append(f"{len(classes)} class{'es' if len(classes) != 1 else ''}")
+    if personal:
+        parts.append(f"{len(personal)} personal item{'s' if len(personal) != 1 else ''}")
 
     today_str = now.astimezone().strftime("%m/%d")
     lines = [f"Canvas ({today_str}): {', '.join(parts)}."]
