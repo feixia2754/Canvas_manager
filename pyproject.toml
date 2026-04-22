@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-canvas-manager = "canvas_manager.main:cli"
+mana = "canvas_manager.main:cli"
 
 [tool.bumpversion]
 current_version = "0.5.0"

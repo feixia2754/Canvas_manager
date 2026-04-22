@@ -1,4 +1,4 @@
-"""CLI entry point for canvas-manager."""
+"""CLI entry point for mana (canvas-manager)."""
 
 from __future__ import annotations
 
@@ -245,11 +245,11 @@ GEMINI_MODEL=gemini-2.0-flash-lite
     console.print(f"\n[green]✓[/green] Saved config to [dim]{env_path}[/dim]")
 
     console.print("\n[bold]Next steps:[/bold]")
-    console.print("  1. Run [cyan]canvas-manager habits[/cyan] to set your schedule preferences")
-    console.print("  2. Run [cyan]canvas-manager sync[/cyan] to fetch your first deadlines")
-    console.print("  3. Run [cyan]canvas-manager plan[/cyan] to generate today's schedule")
-    console.print("  4. Run [cyan]canvas-manager setup-cron[/cyan] to install daily automated reminders")
-    console.print("  5. Run [cyan]canvas-manager todo[/cyan] to preview a reminder summary\n")
+    console.print("  1. Run [cyan]mana habits[/cyan] to set your schedule preferences")
+    console.print("  2. Run [cyan]mana sync[/cyan] to fetch your first deadlines")
+    console.print("  3. Run [cyan]mana plan[/cyan] to generate today's schedule")
+    console.print("  4. Run [cyan]mana setup-cron[/cyan] to install daily automated reminders")
+    console.print("  5. Run [cyan]mana todo[/cyan] to preview a reminder summary\n")
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +265,8 @@ def import_ical(ical_file: str | None) -> None:
 
     \b
     Example:
-      canvas-manager import-ical ~/Downloads/calendar.ics
-      canvas-manager import-ical
+      mana import-ical ~/Downloads/calendar.ics
+      mana import-ical
     """
     if not ical_file:
         ical_file = Prompt.ask("Path to your .ics file").strip().strip("'\"")
@@ -310,7 +310,7 @@ def import_ical(ical_file: str | None) -> None:
         d.pop("recurrence", None)
     _print_table(merged, title="Merged Deadlines (iCal + Canvas)")
     _save_cache(merged)
-    console.print(f"\n[dim]Saved. Run [bold]canvas-manager list[/bold] to view or [bold]canvas-manager todo[/bold] to see a summary.[/dim]")
+    console.print(f"\n[dim]Saved. Run [bold]mana list[/bold] to view or [bold]mana todo[/bold] to see a summary.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +385,7 @@ def sync(skip_gcal: bool) -> None:
         console.print("[green]done[/green]")
 
     _save_cache(deadlines)
-    console.print(f"[green]✓[/green] Saved {len(deadlines)} deadline(s). Run [cyan]canvas-manager list[/cyan] to view.")
+    console.print(f"[green]✓[/green] Saved {len(deadlines)} deadline(s). Run [cyan]mana list[/cyan] to view.")
 
 
 # ---------------------------------------------------------------------------
@@ -448,10 +448,10 @@ def todo(
 
     \b
     Examples:
-      canvas-manager todo
-      canvas-manager todo --assignments
-      canvas-manager todo --email --sms
-      canvas-manager todo --days 7 --classes
+      mana todo
+      mana todo --assignments
+      mana todo --email --sms
+      mana todo --days 7 --classes
     """
     reminder_cfg = get_reminder_config()
     lookahead = days if days is not None else reminder_cfg["lookahead_days"]
@@ -535,7 +535,7 @@ def setup_cron(reminder_time: str | None) -> None:
         console.print(f"[red]Invalid time: {t}. Use HH:MM.[/red]")
         sys.exit(1)
 
-    cmd = which("canvas-manager") or "canvas-manager"
+    cmd = which("mana") or "mana"
     log = Path.home() / ".canvas_manager.log"
     cron_line = f"{minute} {hour} * * * {cmd} sync && {cmd} todo --email --sms >> {log} 2>&1"
 
@@ -543,7 +543,7 @@ def setup_cron(reminder_time: str | None) -> None:
     existing_cron = result.stdout if result.returncode == 0 else ""
     new_cron = "\n".join(
         line for line in existing_cron.splitlines()
-        if "canvas-manager" not in line
+        if "canvas-manager" not in line and " mana " not in line
     )
     new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
     subprocess.run(["crontab", "-"], input=new_cron, text=True)
@@ -562,7 +562,7 @@ def clear_cache() -> None:
         console.print("[yellow]No cache file found — nothing to delete.[/yellow]")
         return
     DEADLINES_CACHE.unlink()
-    console.print(f"[green]✓[/green] Cache deleted. Run [cyan]canvas-manager sync[/cyan] to rebuild.")
+    console.print(f"[green]✓[/green] Cache deleted. Run [cyan]mana sync[/cyan] to rebuild.")
 
 
 # ---------------------------------------------------------------------------
@@ -758,10 +758,10 @@ def send(
 
     \b
     Examples:
-      canvas-manager send
-      canvas-manager send --preview
-      canvas-manager send --email
-      canvas-manager send --date 2026-05-01
+      mana send
+      mana send --preview
+      mana send --email
+      mana send --date 2026-05-01
     """
     d = plan_date.date() if plan_date else date.today()
     blocks = _sched.list_blocks(d)
@@ -835,14 +835,14 @@ def schedule_cmd(command_text: str, plan_date: datetime | None, preview: bool) -
 
     \b
     Examples:
-      canvas-manager schedule "add gym from 3pm to 4pm"
-      canvas-manager schedule "move the ML homework block to 2pm"
-      canvas-manager schedule "delete the study block"
-      canvas-manager schedule "clear everything after 6pm"
+      mana schedule "add gym from 3pm to 4pm"
+      mana schedule "move the ML homework block to 2pm"
+      mana schedule "delete the study block"
+      mana schedule "clear everything after 6pm"
     """
     gemini_cfg = get_gemini_config()
     if not gemini_cfg["api_key"]:
-        console.print("[red]Error: GEMINI_API_KEY is not set. Run 'canvas-manager setup' to configure Gemini.[/red]")
+        console.print("[red]Error: GEMINI_API_KEY is not set. Run 'mana setup' to configure Gemini.[/red]")
         return
 
     d = plan_date.date() if plan_date else date.today()
@@ -920,15 +920,15 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
     """View and generate the study plan for a day.
 
     Automatically places study blocks for assignments due that day, then
-    displays the full schedule. Use 'canvas-manager schedule "<command>"'
+    displays the full schedule. Use 'mana schedule "<command>"'
     to manually adjust blocks afterwards.
 
     \b
     Examples:
-      canvas-manager plan
-      canvas-manager plan --date 2026-05-01
-      canvas-manager plan --overwrite
-      canvas-manager plan --export
+      mana plan
+      mana plan --date 2026-05-01
+      mana plan --overwrite
+      mana plan --export
     """
     d = plan_date.date() if plan_date else date.today()
     habits = _load_habits() or dict(_DEFAULT_HABITS)

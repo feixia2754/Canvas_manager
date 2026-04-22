@@ -6,7 +6,7 @@ Canvas Manager is a CLI tool that aggregates Canvas LMS deadlines, Google Calend
 
 Entry point: `canvas_manager.main:cli` (Click group).  
 Install: `pip install -e .`  
-Run: `canvas-manager <command>`
+Run: `mana <command>`
 
 ---
 
