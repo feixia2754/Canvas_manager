@@ -920,7 +920,7 @@ def plan_cmd(plan_date: datetime | None, overwrite: bool,
     """View and generate the study plan for a day.
 
     Automatically places study blocks for assignments due that day, then
-    displays the full schedule. Use 'schedule add/move/update/delete/clear'
+    displays the full schedule. Use 'canvas-manager schedule "<command>"'
     to manually adjust blocks afterwards.
 
     \b
