@@ -244,7 +244,7 @@ Three Gemini calls power the AI features. All require `GEMINI_API_KEY` in `.env`
 | `improve_schedule` | `plan`, `schedule` | Optimizes block placement and pacing |
 | `parse_schedule_command` | `schedule` | Interprets free-text commands into block edits |
 
-Model: `gemini-2.0-flash-lite` (configurable via `GEMINI_MODEL` in `.env`).
+Model: `gemini-2.5-flash-lite` (configurable via `GEMINI_MODEL` in `.env`).
 
 ---
 

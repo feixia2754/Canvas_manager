@@ -239,7 +239,7 @@ GCAL_CALENDAR_ID={gcal_id}
 GCAL_DAYS_AHEAD=30
 
 GEMINI_API_KEY={gemini_key}
-GEMINI_MODEL=gemini-2.0-flash-lite
+GEMINI_MODEL=gemini-2.5-flash-lite
 """
     env_path.write_text(env_content)
     console.print(f"\n[green]✓[/green] Saved config to [dim]{env_path}[/dim]")

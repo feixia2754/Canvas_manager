@@ -105,5 +105,5 @@ def get_reminder_config() -> dict:
 def get_gemini_config() -> dict:
     return {
         "api_key": os.getenv("GEMINI_API_KEY", ""),
-        "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite"),
+        "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
     }
