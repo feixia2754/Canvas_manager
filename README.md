@@ -1,6 +1,6 @@
 # Canvas Manager
 
-[![CI](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml)
+[![CI](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml/badge.svg?branch=v7)](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml)
 
 Automatically fetches Canvas LMS assignments and Google Calendar events, builds an AI-powered daily study schedule, and sends email + SMS reminders — no Twilio required. Uses the Gmail API for all notifications and Google Gemini for smart scheduling.
 
