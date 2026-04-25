@@ -1,18 +1,21 @@
 # Canvas Manager
 
-Automatically fetches your Canvas assignments and Google Calendar events, then sends you daily email and SMS reminders — no Twilio required. Uses the Gmail API to send both.
+[![CI](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml/badge.svg?branch=v7)](https://github.com/feixia2754/Canvas_manager/actions/workflows/test.yml)
+
+Automatically fetches Canvas LMS assignments and Google Calendar events, builds an AI-powered daily study schedule, and sends email + SMS reminders — no Twilio required. Uses the Gmail API for all notifications and Google Gemini for smart scheduling.
 
 ---
 
 ## Features
 
-- Fetches upcoming assignments directly from Canvas
-- Fetches events from Google Calendar automatically (no manual `.ics` import needed)
-- Sends formatted HTML email reminders with due dates and submission status
-- Sends SMS reminders via your carrier's email-to-SMS gateway
+- Fetches upcoming assignments from Canvas and events from Google Calendar
+- Classifies deadlines into types (`class`, `assignment`, `personal`, `study`, `other`) with Gemini AI
+- Generates a daily study plan around your habits (wake/sleep, peak focus hours, priority order, exam prep)
+- Improves and optimizes the generated schedule with Gemini
+- Natural-language schedule editing: `mana schedule "add gym at 3pm"`
+- Sends formatted HTML email and SMS reminders for deadlines or today's schedule
 - Shows `✓ submitted` indicator for already-submitted Canvas assignments
-- Daily cron job syncs and sends reminders automatically every morning
-- Interactive `setup` command — no manual file editing required
+- Daily cron job syncs, plans, and reminds automatically
 
 ---
 
@@ -22,7 +25,8 @@ Automatically fetches your Canvas assignments and Google Calendar events, then s
 - A Canvas account with API access
 - A Gmail account (used to send email and SMS)
 - A Google Cloud project with **Gmail API** and **Google Calendar API** enabled
-- A US phone number and your carrier name
+- A US phone number and carrier name
+- (Optional but recommended) A [Google Gemini API key](https://aistudio.google.com/app/apikey) for smart classification, duration estimation, and schedule improvement
 
 ---
 
@@ -32,213 +36,247 @@ Automatically fetches your Canvas assignments and Google Calendar events, then s
 pip install .
 ```
 
-This installs the `canvas-manager` command.
+This installs the `mana` command globally.
 
 ---
 
-## Setup
+## New User Walkthrough
 
 ### Step 1 — Get your Canvas API token
 
 1. Log in to Canvas (e.g. `https://canvas.youruniversity.edu`)
 2. Go to **Account → Settings**
 3. Scroll to **Approved Integrations → New Access Token**
-4. Give it a name, click **Generate Token**, and copy it — you only see it once
+4. Give it a name, click **Generate Token**, and copy it (shown only once)
 
 ---
 
 ### Step 2 — Set up Google Cloud credentials
 
-This allows the app to send emails/SMS via Gmail and read your Google Calendar.
-
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or use an existing one)
-3. Go to **APIs & Services → Library** and enable:
-   - **Gmail API**
-   - **Google Calendar API**
-4. Go to **APIs & Services → OAuth consent screen**
-   - Choose **External**, fill in the app name and your email
-   - Add your Gmail address as a test user
-5. Go to **APIs & Services → Credentials**
-   - Click **Create Credentials → OAuth client ID**
-   - Choose **Desktop app**
-   - Click **Download JSON**
-6. Rename the downloaded file to exactly `credentials.json` and place it in the project directory
+2. Create a project and enable **Gmail API** and **Google Calendar API**
+3. Go to **APIs & Services → OAuth consent screen** → External; add your Gmail as a test user
+4. Go to **Credentials → Create Credentials → OAuth client ID → Desktop app**
+5. Download the JSON file and rename it to exactly `credentials.json` in the project directory
 
-> **Note:** Google names the downloaded file with a long ID (e.g. `client_secret_....json`). It must be renamed to `credentials.json` or the app will not find it.
-
-> The first time you run `sync`, a browser window opens for you to authorize the app. A `token.json` file is created automatically and reused. **Do not commit either file to git.**
+> The first time you run `sync`, a browser window opens for Google authorization. A `token.json` is created and reused automatically. **Never commit either file.**
 
 ---
 
-### Step 3 — Run the interactive setup
+### Step 3 — Run interactive setup
 
 ```bash
-canvas-manager setup
+mana setup
 ```
 
-This walks you through all configuration interactively — no manual file editing needed:
-
-```
-────────── Canvas Manager — Setup ──────────
-
-Canvas
-  Canvas base URL [https://canvas.cmu.edu]:
-  Canvas API token:
-  Verifying Canvas credentials... OK
-
-Email
-  Send reminders to (email):
-
-SMS
-  Your phone number (e.g. +11234567890):
-  Your carrier (tmobile/att/verizon/...):
-
-Google Calendar
-  Google Calendar ID [primary]:
-
-Reminder settings
-  Daily reminder time (HH:MM, 24h) [08:00]:
-  Days ahead to include in reminders [3]:
-
-✓ Saved config to .env
-  Install daily cron job? [Y/n]: Y
-✓ Cron job set for 08:00 daily
-```
-
-The setup command:
-- Validates your Canvas URL and token with a live API call
-- Validates your Google Calendar ID against the Calendar API
-- Writes all settings to `.env`
-- Installs the daily cron job automatically
+Walks you through all credentials interactively, validates them live, and writes `.env`. Optionally enter a Gemini API key to enable AI features.
 
 ---
 
-### Step 4 — Fetch your first deadlines
+### Step 4 — Set your schedule habits
 
 ```bash
-canvas-manager sync
+mana habits
 ```
 
-Fetches upcoming assignments from Canvas and events from Google Calendar, merges them, and saves locally.
+Configure wake/sleep times, peak focus hours, break length, priority order, and exam prep settings (how many study blocks to place N days before an exam). These drive the AI scheduler.
 
 ---
 
-### Step 5 — Preview your reminder
+### Step 5 — Sync your deadlines
 
 ```bash
-canvas-manager remind --preview
+mana sync
 ```
 
-Shows what the email and SMS will look like without sending anything.
+Fetches assignments from Canvas and events from Google Calendar, Gemini-classifies them, and caches them locally.
+
+---
+
+### Step 6 — Generate today's plan
+
+```bash
+mana plan
+```
+
+Builds a study schedule for today using your habits. Gemini estimates how long each task will take and then improves the final block layout. Use `schedule` to tweak the result.
 
 ---
 
 ## Commands
 
 ### `setup`
-Interactive first-time configuration. Fills `.env` and installs the cron job.
+Interactive first-time configuration. Validates credentials live and writes `.env`.
 
 ```bash
-canvas-manager setup
+mana setup
+```
+
+---
+
+### `habits`
+Set or review schedule preferences: wake/sleep, peak focus hours, priority order, exam prep.
+
+```bash
+mana habits
 ```
 
 ---
 
 ### `sync`
-Fetch the latest assignments from Canvas and events from Google Calendar.
+Fetch the latest assignments from Canvas and Google Calendar, classify with Gemini, and save locally.
 
 ```bash
-canvas-manager sync
-
-# Skip Google Calendar and fetch Canvas only
-canvas-manager sync --no-gcal
+mana sync
+mana sync --no-gcal   # skip Google Calendar
 ```
 
 ---
 
 ### `list`
-Show upcoming deadlines from the local cache.
+Show upcoming deadlines from the local cache, split into assignments, classes, and personal items.
 
 ```bash
-canvas-manager list
-canvas-manager list --days 7
+mana list
+mana list --days 7
 ```
-
-Defaults to 14 days ahead. Shows source (`canvas` or `gcal`) and submission status.
 
 ---
 
-### `remind`
-Send email and/or SMS reminders.
+### `plan`
+Generate (or view) the study schedule for a day. Gemini estimates task durations and optimizes block placement.
 
 ```bash
-# Send both email and SMS
-canvas-manager remind
+mana plan                        # today
+mana plan --date 2026-05-01
+mana plan --overwrite            # clear and replan from scratch
+mana plan --export               # write .ics file
+mana plan --export --out ~/plan.ics
+```
 
-# Preview without sending
-canvas-manager remind --preview
+---
 
-# Email only
-canvas-manager remind --email-only
+### `todo`
+Show a summary count of upcoming deadlines. Add flags to see detail tables or send notifications.
 
-# SMS only
-canvas-manager remind --sms-only
+```bash
+mana todo                        # "3 assignments, 2 classes, 1 personal item"
+mana todo --assignments          # show assignment table
+mana todo --classes              # show class table
+mana todo --personal             # show personal table
+mana todo --email                # send email
+mana todo --sms                  # send SMS
+mana todo --email --sms          # send both
+mana todo --days 7               # override lookahead window
+mana todo --to-email you@example.com
+```
 
-# Override lookahead window
-canvas-manager remind --days 5
+---
 
-# Send to a different email address
-canvas-manager remind --to-email someone@example.com
+### `send`
+Send today's block schedule (from `plan`) via email and/or SMS.
+
+```bash
+mana send                        # email + SMS (default: both)
+mana send --email                # email only
+mana send --sms                  # SMS only
+mana send --preview              # print without sending
+mana send --date 2026-05-01
+mana send --to-email you@example.com
+```
+
+---
+
+### `schedule`
+Modify today's schedule with a natural-language command, powered by Gemini.
+
+```bash
+mana schedule "add gym from 3pm to 4pm"
+mana schedule "move the ML homework block to 2pm"
+mana schedule "delete the study block"
+mana schedule "clear everything after 6pm"
+mana schedule "rename HW5 to Problem Set 5"
+mana schedule "add a 30-min break at noon" --date 2026-05-01
+mana schedule "add lunch at noon" --preview   # show changes without saving
+```
+
+> Requires a Gemini API key (set during `setup` or via `GEMINI_API_KEY` in `.env`).
+
+---
+
+### `export`
+Export a day's block schedule to an iCal (`.ics`) file. Import the result into
+Google Calendar, Apple Calendar, or any calendar app.
+
+```bash
+mana export                          # today → schedule-YYYY-MM-DD.ics
+mana export --date 2026-05-01
+mana export --out ~/Downloads/plan.ics
+```
+
+> Tip: `mana plan --export` generates and exports in one step.
+
+---
+
+### `import-ical`
+Import a `.ics` calendar file and merge it with Canvas deadlines.
+
+```bash
+mana import-ical ~/Downloads/calendar.ics
+mana import-ical   # prompts for the file path
 ```
 
 ---
 
 ### `setup-cron`
-Print the crontab line for daily reminders (already installed by `setup`, use this to change the time).
+Install a daily cron job that runs `sync` then `todo --email --sms` at a chosen time.
 
 ```bash
-canvas-manager setup-cron
-canvas-manager setup-cron --time 09:30
+mana setup-cron
+mana setup-cron --time 09:30
 ```
-
-Add the printed line to your crontab with `crontab -e`.
-
----
-
-### `import-ical`
-Manually import a `.ics` calendar file and merge it with Canvas (optional — `sync` handles this automatically via Google Calendar).
-
-```bash
-canvas-manager import-ical ~/Downloads/calendar.ics
-canvas-manager import-ical   # prompts for the file path
-```
-
----
-
-## How the daily cron works
-
-Once set up, every morning at your chosen time the cron runs:
-
-```
-canvas-manager sync && canvas-manager remind
-```
-
-1. `sync` — fetches fresh assignments from Canvas + Google Calendar
-2. `remind` — sends the email and SMS with everything due in the next N days
 
 Logs are written to `~/.canvas_manager.log`.
 
 ---
 
-## Google Calendar ID
+### `clear-cache`
+Delete the local deadlines cache.
 
-By default the app uses your primary Google Calendar. To use a different calendar:
+```bash
+mana clear-cache
+```
 
-1. Open [Google Calendar](https://calendar.google.com)
-2. Click the three dots next to the calendar → **Settings**
-3. Scroll to **Calendar ID** (looks like `abc123@group.calendar.google.com`)
-4. Enter it when prompted during `setup`, or update `GCAL_CALENDAR_ID` in `.env`
+---
+
+## Gemini AI integration
+
+Three Gemini calls power the AI features. All require `GEMINI_API_KEY` in `.env`; without it, the tool falls back gracefully to rule-based behavior.
+
+| Call | When | What it does |
+|---|---|---|
+| `classify_events` | `sync` | Corrects type labels on incoming deadlines |
+| `estimate_durations` | `plan` | Estimates realistic work time per task |
+| `improve_schedule` | `plan`, `schedule` | Optimizes block placement and pacing |
+| `parse_schedule_command` | `schedule` | Interprets free-text commands into block edits |
+
+Model: `gemini-2.5-flash-lite` (configurable via `GEMINI_MODEL` in `.env`).
+
+---
+
+## Daily automation
+
+Once `setup-cron` is installed, every morning at your chosen time:
+
+```
+mana sync && mana todo --email --sms
+```
+
+To also send the day's study schedule, add a second cron line:
+
+```
+mana plan && mana send
+```
 
 ---
 
@@ -261,21 +299,14 @@ By default the app uses your primary Google Calendar. To use a different calenda
 
 | File | Purpose |
 |---|---|
-| `.env` | All your settings and tokens — **never commit this** |
-| `credentials.json` | Google OAuth credentials from Cloud Console — **never commit this** |
-| `token.json` | Auto-generated Google access token — **never commit this** |
-| `.canvas_manager_deadlines.json` | Local cache of deadlines — safe to gitignore |
+| `.env` | All settings and tokens — **never commit** |
+| `credentials.json` | Google OAuth credentials — **never commit** |
+| `token.json` | Auto-generated Google access token — **never commit** |
+| `~/.canvas_manager/habits.json` | Your schedule preferences |
+| `.canvas_manager_deadlines.json` | Local deadline cache |
 
 ---
 
 ## Security
 
-The following files contain sensitive credentials and are excluded from git by default:
-
-```
-.env
-credentials.json
-token.json
-```
-
-Never share or commit these files.
+`.env`, `credentials.json`, and `token.json` are excluded from git by default. Never share or commit these files.

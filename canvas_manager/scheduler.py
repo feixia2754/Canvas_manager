@@ -3,10 +3,11 @@
 Reads habit preferences from HABITS_FILE (falls back to DEFAULT_HABITS)
 and upcoming deadlines from the shared deadlines cache, then:
 
-  Pass 1 — place timed events (classes, GCal events) at their exact
-            start_at → due_at slots.
-  Pass 2 — place assignment study blocks in remaining free time after
-            the last timed event ends on target_date.
+  Pass 1 — place timed GCal events at their exact start_at → due_at slots.
+  Pass 2 — place remaining deadlines by priority then urgency, awarding
+            peak focus hours to the highest-priority items first.
+  Pass 3 — place exam prep study blocks for any exam/quiz within the
+            prep window defined by exam_prep_days_before in habits.
 """
 
 from __future__ import annotations
@@ -21,22 +22,24 @@ from .schedule import Block
 HABITS_FILE: Path = Path.home() / ".canvas_manager" / "habits.json"
 DEADLINES_CACHE: Path = Path(__file__).parent.parent / ".canvas_manager_deadlines.json"
 
+_EXAM_KEYWORDS = {"quiz", "exam", "test", "midterm", "final"}
+_DEFAULT_PRIORITY = ["class", "assignment", "personal", "study", "other"]
+
 DEFAULT_HABITS: dict = {
     "wake_time": "08:00",
     "sleep_time": "23:00",
+    "peak_focus_hours": ["09:00-11:00"],
     "preferred_block_minutes": 90,
     "break_minutes": 15,
     "hard_stops": [{"start": "12:00", "end": "13:00"}],
+    "priority_order": _DEFAULT_PRIORITY,
+    "exam_prep_days_before": 2,
+    "exam_prep_blocks_per_day": 2,
+    "exam_prep_block_minutes": 60,
 }
 
 
 def _load_habits() -> tuple[dict, bool]:
-    """Load habits from HABITS_FILE or fall back to DEFAULT_HABITS.
-
-    Returns:
-        Tuple of (habits_dict, used_custom) where used_custom is True
-        when HABITS_FILE was found and loaded successfully.
-    """
     if HABITS_FILE.exists():
         try:
             return json.loads(HABITS_FILE.read_text()), True
@@ -46,14 +49,39 @@ def _load_habits() -> tuple[dict, bool]:
 
 
 def _parse_hhmm(s: str) -> int:
-    """Convert "HH:MM" to minutes since midnight."""
     h, m = map(int, s.split(":"))
     return h * 60 + m
 
 
 def _format_hhmm(mins: int) -> str:
-    """Convert minutes since midnight to "HH:MM"."""
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _parse_peak_ranges(ranges: list[str]) -> list[tuple[int, int]]:
+    result = []
+    for r in ranges:
+        if "-" in r:
+            parts = r.split("-", 1)
+            try:
+                result.append((_parse_hhmm(parts[0].strip()), _parse_hhmm(parts[1].strip())))
+            except ValueError:
+                pass
+    return result
+
+
+def _slot_overlaps_peak(start: int, end: int, peak_ranges: list[tuple[int, int]]) -> bool:
+    return any(start < pe and ps < end for ps, pe in peak_ranges)
+
+
+def _priority_score(deadline: dict, priority_order: list[str]) -> int:
+    try:
+        return priority_order.index(deadline.get("type", "other"))
+    except ValueError:
+        return len(priority_order)
+
+
+def _is_exam(name: str) -> bool:
+    return bool(set(name.lower().split()) & _EXAM_KEYWORDS)
 
 
 def _free_slots(
@@ -61,19 +89,6 @@ def _free_slots(
     work_end: int,
     occupied: list[tuple[int, int]],
 ) -> list[tuple[int, int]]:
-    """Subtract occupied ranges from [work_start, work_end].
-
-    Occupied ranges may overlap or be unsorted; they are merged before
-    subtraction and clipped to the work window.
-
-    Args:
-        work_start: Start of the work window in minutes since midnight.
-        work_end: End of the work window in minutes since midnight.
-        occupied: List of (start, end) minute tuples already taken.
-
-    Returns:
-        Sorted list of non-overlapping (start, end) free ranges.
-    """
     if not occupied:
         return [(work_start, work_end)] if work_start < work_end else []
 
@@ -96,17 +111,31 @@ def _free_slots(
         cursor = max(cursor, e)
     if cursor < work_end:
         free.append((cursor, work_end))
-
     return free
 
 
-def _load_deadlines() -> list[dict]:
-    """Load cached deadlines from DEADLINES_CACHE.
+def _consume_slot(
+    free: list[tuple[int, int]],
+    start: int,
+    duration: int,
+    break_min: int,
+) -> list[tuple[int, int]]:
+    """Remove [start, start+duration] from free and add a break gap."""
+    end = start + duration
+    tail = end + break_min
+    new_free: list[tuple[int, int]] = []
+    for fs, fe in free:
+        if fe <= start or fs >= end:
+            new_free.append((fs, fe))
+        else:
+            if fs < start:
+                new_free.append((fs, start))
+            if tail < fe:
+                new_free.append((tail, fe))
+    return sorted(new_free)
 
-    Returns:
-        List of deadline dicts with timezone-aware datetimes,
-        or [] if the file does not exist or cannot be parsed.
-    """
+
+def _load_deadlines() -> list[dict]:
     if not DEADLINES_CACHE.exists():
         return []
     try:
@@ -121,18 +150,6 @@ def _load_deadlines() -> list[dict]:
 
 
 def _urgency_score(deadline: dict, target_date: date) -> float:
-    """Return urgency score; lower = more urgent.
-
-    Uses seconds between local midnight of target_date and due_at.
-    Submitted deadlines always return float("inf").
-
-    Args:
-        deadline: Deadline dict containing at least "due_at" and "submitted".
-        target_date: The day for which the plan is being generated.
-
-    Returns:
-        Float score; smaller means the deadline is sooner.
-    """
     if deadline.get("submitted"):
         return float("inf")
     local_midnight = datetime.combine(
@@ -141,44 +158,7 @@ def _urgency_score(deadline: dict, target_date: date) -> float:
     return (deadline["due_at"] - local_midnight).total_seconds()
 
 
-def _filter_relevant_deadlines(
-    deadlines: list[dict],
-    target_date: date,
-    window_days: int = 7,
-) -> list[dict]:
-    """Keep only upcoming, non-submitted deadlines within the planning window.
-
-    Args:
-        deadlines: Full list of deadline dicts.
-        target_date: Start of the window (inclusive, local midnight).
-        window_days: Number of days ahead to include (default 7).
-
-    Returns:
-        Filtered list; input is not modified.
-    """
-    local_start = datetime.combine(
-        target_date, datetime_time(0, 0)
-    ).astimezone(timezone.utc)
-    local_end = datetime.combine(
-        target_date + timedelta(days=window_days), datetime_time(23, 59)
-    ).astimezone(timezone.utc)
-    return [
-        d for d in deadlines
-        if not d.get("submitted") and local_start <= d["due_at"] <= local_end
-    ]
-
-
 def _on_target_date(deadline: dict, target_date: date, use_start: bool = False) -> bool:
-    """Return True if the deadline falls on target_date in local time.
-
-    Args:
-        deadline: Deadline dict.
-        target_date: The day to check against.
-        use_start: If True and start_at is present, use start_at; else use due_at.
-
-    Returns:
-        True when the datetime, converted to local timezone, is on target_date.
-    """
     if use_start and deadline.get("start_at"):
         dt = deadline["start_at"].astimezone()
     else:
@@ -186,16 +166,62 @@ def _on_target_date(deadline: dict, target_date: date, use_start: bool = False) 
     return dt.date() == target_date
 
 
-def generate_plan(target_date: date, overwrite: bool = False) -> dict:
+def _place_block(
+    target_date: date,
+    free: list[tuple[int, int]],
+    title: str,
+    block_type: str,
+    source: str,
+    duration: int,
+    break_min: int,
+    peak_ranges: list[tuple[int, int]],
+    prefer_peak: bool,
+) -> tuple[Block | None, list[tuple[int, int]]]:
+    """Try to place a block of `duration` minutes into free slots.
+
+    Returns (placed_block, updated_free) or (None, free) if no slot fits.
+    Peak slots are tried first when prefer_peak is True.
+    """
+    eligible = [(s, e) for s, e in free if e - s >= duration]
+    if not eligible:
+        return None, free
+
+    sorted_slots = sorted(
+        eligible,
+        key=lambda se: (
+            0 if prefer_peak and _slot_overlaps_peak(se[0], se[0] + duration, peak_ranges) else 1,
+            se[0],
+        ),
+    )
+
+    for s, _ in sorted_slots:
+        try:
+            block = _sched.add_block(target_date, {
+                "id": "",
+                "start": _format_hhmm(s),
+                "end": _format_hhmm(s + duration),
+                "title": title,
+                "type": block_type,
+                "source": source,
+            })
+            return block, _consume_slot(free, s, duration, break_min)
+        except ValueError:
+            continue
+
+    return None, free
+
+
+def generate_plan(
+    target_date: date,
+    overwrite: bool = False,
+    deadline_overrides: list[dict] | None = None,
+) -> dict:
     """Generate a study plan for target_date.
 
-    Pass 1: place timed events (those with start_at) at their exact time slots.
-    Pass 2: place assignment study blocks after the last timed event ends,
-            sorted by urgency (soonest due_at first).
-
-    Args:
-        target_date: The day to plan.
-        overwrite: If True, clears all existing blocks before planning.
+    Pass 1: place timed GCal events at their exact slots.
+    Pass 2: place remaining deadlines by priority then urgency, with peak
+            focus hours awarded to the highest-priority items.
+    Pass 3: place exam prep study blocks for exams within the prep window.
 
     Returns:
         Dict with keys:
@@ -213,19 +239,37 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         existing = []
         existing_count = 0
 
-    wake = _parse_hhmm(habits["wake_time"])
-    sleep = _parse_hhmm(habits["sleep_time"])
+    wake      = _parse_hhmm(habits["wake_time"])
+    sleep     = _parse_hhmm(habits["sleep_time"])
     preferred = habits["preferred_block_minutes"]
     break_min = habits["break_minutes"]
 
-    # For today, never place blocks in time that has already passed
-    now_local = datetime.now().astimezone()
-    is_today = (target_date == now_local.date())
-    now_mins = now_local.hour * 60 + now_local.minute if is_today else 0
+    priority_order   = habits.get("priority_order", _DEFAULT_PRIORITY)
+    peak_ranges      = _parse_peak_ranges(habits.get("peak_focus_hours", []))
+    exam_prep_days   = habits.get("exam_prep_days_before", 2)
+    exam_prep_blocks = habits.get("exam_prep_blocks_per_day", 2)
+    exam_prep_mins   = habits.get("exam_prep_block_minutes", 60)
 
-    deadlines = _load_deadlines()
+    now_local  = datetime.now().astimezone()
+    is_today   = (target_date == now_local.date())
+    now_mins   = now_local.hour * 60 + now_local.minute if is_today else 0
 
-    # Pass 1 candidates: GCal events with a known start time on target_date
+    deadlines = deadline_overrides if deadline_overrides is not None else _load_deadlines()
+
+    # Titles already covered — prevents double-booking on re-runs
+    already_covered: set[str] = set()
+    for b in existing:
+        if b["type"] in ("assignment", "personal", "other"):
+            already_covered.add(b["title"])
+        elif b["type"] == "study":
+            already_covered.add(b["title"])
+            if b["title"].startswith("Study: "):
+                already_covered.add(b["title"][7:])
+
+    placed: list[Block] = []
+    skipped: list[str] = []
+
+    # --- Pass 1: timed GCal events at their exact slots ---
     events_today = sorted(
         [
             d for d in deadlines
@@ -236,63 +280,29 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         key=lambda d: d["start_at"],
     )
 
-    # Pass 2 candidates: Canvas/iCal assignments due on target_date (never GCal)
-    assignments_today = sorted(
-        [
-            d for d in deadlines
-            if d.get("source") != "gcal"
-            and not d.get("submitted")
-            and _on_target_date(d, target_date, use_start=False)
-        ],
-        key=lambda d: _urgency_score(d, target_date),
-    )
-
-    placed: list[Block] = []
-    skipped: list[str] = []
-
-    # Titles of assignments already slotted — avoid double-booking on re-runs
-    # Also match legacy "Study: X" titles from old runs
-    already_covered: set[str] = {
-        b["title"]
-        for b in existing
-        if b["type"] == "assignment"
-    } | {
-        b["title"].removeprefix("Study: ")
-        for b in existing
-        if b["source"] in ("", "planner", "auto", "ai") and b["type"] == "study"
-    }
-
-    # --- Pass 1: place timed GCal events at their exact slots ---
     for dl in events_today:
         local_start = dl["start_at"].astimezone()
-        local_end = dl["due_at"].astimezone()
-        start_mins = local_start.hour * 60 + local_start.minute
-        end_mins = local_end.hour * 60 + local_end.minute
-        if start_mins >= end_mins:
+        local_end   = dl["due_at"].astimezone()
+        s = local_start.hour * 60 + local_start.minute
+        e = local_end.hour * 60 + local_end.minute
+        if s >= e:
             skipped.append(dl["name"])
             continue
         try:
             block = _sched.add_block(target_date, {
-                "id": "",
-                "start": _format_hhmm(start_mins),
-                "end": _format_hhmm(end_mins),
-                "title": dl["name"][:40],
-                "type": "class",
-                "source": "gcal",
+                "id": "", "start": _format_hhmm(s), "end": _format_hhmm(e),
+                "title": dl["name"][:40], "type": "class", "source": "gcal",
             })
             placed.append(block)
         except ValueError:
             skipped.append(dl["name"])
 
-    # --- Pass 2: slot Canvas assignments after the last class ends ---
+    # Build free slots after Pass 1
     all_blocks = _sched.list_blocks(target_date)
     timed_blocks = [b for b in all_blocks if b["type"] == "class"]
     last_event_end = (
-        max(_parse_hhmm(b["end"]) for b in timed_blocks)
-        if timed_blocks else wake
+        max(_parse_hhmm(b["end"]) for b in timed_blocks) if timed_blocks else wake
     )
-
-    # Never start before now when planning today
     free_start = max(last_event_end, now_mins) if is_today else last_event_end
 
     occupied: list[tuple[int, int]] = [
@@ -303,32 +313,62 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
 
     free = _free_slots(free_start, sleep, occupied)
 
-    for dl in assignments_today:
+    # --- Pass 2: flexible deadlines sorted by priority then urgency ---
+    flexible_today = sorted(
+        [
+            d for d in deadlines
+            if d.get("source") != "gcal"
+            and not d.get("submitted")
+            and _on_target_date(d, target_date, use_start=False)
+        ],
+        key=lambda d: (_priority_score(d, priority_order), _urgency_score(d, target_date)),
+    )
+
+    for dl in flexible_today:
         name = dl["name"][:40]
         if name in already_covered:
             continue
-        placed_this = False
-        new_free: list[tuple[int, int]] = []
-        for s, e in free:
-            if not placed_this and e - s >= preferred:
-                block = _sched.add_block(target_date, {
-                    "id": "",
-                    "start": _format_hhmm(s),
-                    "end": _format_hhmm(s + preferred),
-                    "title": name,
-                    "type": dl.get("type", "assignment"),
-                    "source": dl.get("source", "canvas"),
-                })
-                placed.append(block)
-                placed_this = True
-                consumed_end = s + preferred + break_min
-                if consumed_end < e:
-                    new_free.append((consumed_end, e))
-            else:
-                new_free.append((s, e))
-        free = new_free
-        if not placed_this:
+
+        prefer_peak = _priority_score(dl, priority_order) <= 1  # class or assignment
+        duration = dl.get("duration_minutes", preferred)
+        block, free = _place_block(
+            target_date, free, name,
+            dl.get("type", "assignment"), dl.get("source", "canvas"),
+            duration, break_min, peak_ranges, prefer_peak,
+        )
+        if block:
+            placed.append(block)
+            already_covered.add(name)
+        else:
             skipped.append(dl["name"])
+
+    # --- Pass 3: exam prep study blocks ---
+    exams_in_window = [
+        d for d in deadlines
+        if _is_exam(d.get("name", ""))
+        and not d.get("submitted")
+        and _exam_in_prep_window(d, target_date, exam_prep_days)
+    ]
+
+    for exam in exams_in_window:
+        study_title = f"Study: {exam['name'][:33]}"
+        if study_title in already_covered:
+            continue
+        blocks_placed = 0
+        for _ in range(exam_prep_blocks):
+            block, free = _place_block(
+                target_date, free, study_title,
+                "study", exam.get("source", "canvas"),
+                exam_prep_mins, break_min, peak_ranges, prefer_peak=True,
+            )
+            if block:
+                placed.append(block)
+                blocks_placed += 1
+            else:
+                break
+        if blocks_placed == 0:
+            skipped.append(study_title)
+        already_covered.add(study_title)
 
     return {
         "blocks": placed,
@@ -336,3 +376,24 @@ def generate_plan(target_date: date, overwrite: bool = False) -> dict:
         "habits_used": "custom" if used_custom else "default",
         "existing_blocks": existing_count,
     }
+
+
+def _filter_relevant_deadlines(
+    deadlines: list[dict],
+    target_date: date,
+    window_days: int = 7,
+) -> list[dict]:
+    """Return non-submitted deadlines due within window_days of target_date."""
+    cutoff = target_date + timedelta(days=window_days)
+    return [
+        d for d in deadlines
+        if not d.get("submitted")
+        and target_date <= d["due_at"].astimezone().date() <= cutoff
+    ]
+
+
+def _exam_in_prep_window(deadline: dict, target_date: date, prep_days: int) -> bool:
+    """True if target_date falls within [exam_date - prep_days, exam_date)."""
+    exam_date = deadline["due_at"].astimezone().date()
+    prep_start = exam_date - timedelta(days=prep_days)
+    return prep_start <= target_date < exam_date

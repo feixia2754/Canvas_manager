@@ -6,8 +6,8 @@ Block schema (TypedDict):
     start:  str   -- "HH:MM" 24-hour
     end:    str   -- "HH:MM" 24-hour
     title:  str
-    type:   Literal["class", "assignment", "study", "break", "other"]
-    source: Literal["canvas", "gcal", "manual", ""]
+    type:   Literal["class", "assignment", "personal", "study", "other"]
+    source: Literal["canvas", "gcal", "ical", "manual"]
 
 Storage layout:
     ~/.canvas_manager/plans/YYYY-MM-DD.json
@@ -30,8 +30,8 @@ class Block(TypedDict):
     start: str
     end: str
     title: str
-    type: Literal["class", "assignment", "study", "break", "personal", "other"]
-    source: Literal["canvas", "gcal", "manual", ""]
+    type: Literal["class", "assignment", "personal", "study", "other"]
+    source: Literal["canvas", "gcal", "ical", "manual"]
 
 
 def plan_path(d: date) -> Path:
