@@ -549,6 +549,7 @@ def setup_cron(reminder_time: str | None) -> None:
     new_cron = new_cron.rstrip() + f"\n{cron_line}\n"
     subprocess.run(["crontab", "-"], input=new_cron, text=True)
     console.print(f"[green]✓[/green] Cron job installed: [bold]sync + todo[/bold] daily at [bold]{t}[/bold]")
+    console.print(f"[dim]Entry: {cron_line}[/dim]")
     console.print(f"[dim]Logs → {log}[/dim]")
 
 
