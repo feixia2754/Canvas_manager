@@ -378,6 +378,20 @@ def generate_plan(
     }
 
 
+def _filter_relevant_deadlines(
+    deadlines: list[dict],
+    target_date: date,
+    window_days: int = 7,
+) -> list[dict]:
+    """Return non-submitted deadlines due within window_days of target_date."""
+    cutoff = target_date + timedelta(days=window_days)
+    return [
+        d for d in deadlines
+        if not d.get("submitted")
+        and target_date <= d["due_at"].astimezone().date() <= cutoff
+    ]
+
+
 def _exam_in_prep_window(deadline: dict, target_date: date, prep_days: int) -> bool:
     """True if target_date falls within [exam_date - prep_days, exam_date)."""
     exam_date = deadline["due_at"].astimezone().date()

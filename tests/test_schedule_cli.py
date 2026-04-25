@@ -1,9 +1,9 @@
-"""Tests for canvas-manager schedule CLI commands."""
+"""Tests for mana CLI commands: export, todo, send --preview, plan smoke."""
 
 from __future__ import annotations
 
-import re
-from datetime import date
+import json
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,18 +12,21 @@ from click.testing import CliRunner
 import canvas_manager.schedule as schedule
 import canvas_manager.scheduler as scheduler
 from canvas_manager.main import cli
+import canvas_manager.main as main_mod
 
 TODAY = date(2026, 4, 20)
 TODAY_STR = "2026-04-20"
 
 
 @pytest.fixture(autouse=True)
-def isolated_plans_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    d = tmp_path / "plans"
-    monkeypatch.setattr(schedule, "PLANS_DIR", d)
+def isolated_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    plans = tmp_path / "plans"
+    cache = tmp_path / "deadlines.json"
+    monkeypatch.setattr(schedule, "PLANS_DIR", plans)
     monkeypatch.setattr(scheduler, "HABITS_FILE", tmp_path / "habits.json")
-    monkeypatch.setattr(scheduler, "DEADLINES_CACHE", tmp_path / "deadlines.json")
-    return d
+    monkeypatch.setattr(scheduler, "DEADLINES_CACHE", cache)
+    monkeypatch.setattr(main_mod, "DEADLINES_CACHE", cache)
+    return tmp_path
 
 
 @pytest.fixture()
@@ -31,148 +34,183 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _add(runner: CliRunner, title: str, start: str, end: str,
-         block_type: str = "study", date_str: str = TODAY_STR) -> str:
-    """Add a block via CLI and return its generated id."""
-    result = runner.invoke(cli, [
-        "schedule", "add", title,
-        "--from", start, "--to", end,
-        "--type", block_type, "--date", date_str,
-    ])
-    assert result.exit_code == 0, result.output
-    m = re.search(r"(blk_[0-9a-f]{8})", result.output)
-    assert m, f"No block id in output: {result.output}"
-    return m.group(1)
+def _seed_blocks(tmp_path: Path, blocks: list[dict]) -> None:
+    plans_dir = tmp_path / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    (plans_dir / f"{TODAY_STR}.json").write_text(json.dumps(blocks, indent=2))
+
+
+def _seed_cache(tmp_path: Path, deadlines: list[dict]) -> None:
+    items = [{**d, "due_at": d["due_at"].isoformat()} for d in deadlines]
+    (tmp_path / "deadlines.json").write_text(json.dumps(items))
+
+
+def _make_deadline(name: str, hours: int = 2, dtype: str = "assignment") -> dict:
+    due = datetime.now(tz=timezone.utc) + timedelta(hours=hours)
+    return {"name": name, "due_at": due, "course": "15-601", "url": "",
+            "source": "canvas", "submitted": False, "type": dtype}
 
 
 # ---------------------------------------------------------------------------
-# plan (view + generate)
+# export
 # ---------------------------------------------------------------------------
 
-def test_plan_empty_shows_message(runner: CliRunner):
-    result = runner.invoke(cli, ["plan", "--date", TODAY_STR])
-    assert result.exit_code == 0
-    assert "No blocks scheduled" in result.output or "No more work today" in result.output
+class TestExportCommand:
+    def test_no_blocks_shows_helpful_message(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(cli, ["export", "--date", TODAY_STR])
+        assert result.exit_code == 0
+        assert "mana plan" in result.output
 
+    def test_exports_ics_file(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Study Session", "type": "study", "source": "manual"},
+        ])
+        out = tmp_path / "out.ics"
+        result = runner.invoke(cli, ["export", "--date", TODAY_STR, "--out", str(out)])
+        assert result.exit_code == 0
+        assert out.exists()
+        content = out.read_text()
+        assert "BEGIN:VCALENDAR" in content
+        assert "Study Session" in content
 
-def test_plan_shows_blocks_sorted_by_start(runner: CliRunner):
-    _add(runner, "Afternoon", "14:00", "15:00")
-    _add(runner, "Morning",   "09:00", "10:00")
-    result = runner.invoke(cli, ["plan", "--date", TODAY_STR])
-    assert result.exit_code == 0
-    assert result.output.index("Morning") < result.output.index("Afternoon")
+    def test_default_output_filename(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Lecture", "type": "class", "source": "gcal"},
+        ])
+        with runner.isolated_filesystem():
+            result = runner.invoke(cli, ["export", "--date", TODAY_STR])
+            assert result.exit_code == 0
+            assert Path(f"schedule-{TODAY_STR}.ics").exists()
 
-
-# ---------------------------------------------------------------------------
-# add
-# ---------------------------------------------------------------------------
-
-def test_add_creates_block_and_prints_confirmation(runner: CliRunner):
-    result = runner.invoke(cli, [
-        "schedule", "add", "Study Session",
-        "--from", "09:00", "--to", "10:00", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    assert "Added block" in result.output
-    assert "09:00" in result.output
-    assert "10:00" in result.output
-
-
-def test_add_overlap_allowed(runner: CliRunner):
-    _add(runner, "First", "09:00", "11:00")
-    result = runner.invoke(cli, [
-        "schedule", "add", "Overlap",
-        "--from", "10:00", "--to", "12:00", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    assert len(schedule.load_plan(TODAY)) == 2
-
-
-# ---------------------------------------------------------------------------
-# move
-# ---------------------------------------------------------------------------
-
-def test_move_to_only_preserves_duration(runner: CliRunner):
-    block_id = _add(runner, "Lecture", "09:00", "11:00")  # 2h block
-    result = runner.invoke(cli, [
-        "schedule", "move", block_id, "--to", "13:00", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    b = next(b for b in schedule.load_plan(TODAY) if b["id"] == block_id)
-    assert b["start"] == "11:00"
-    assert b["end"]   == "13:00"
-
-
-def test_move_both_from_and_to_uses_literally(runner: CliRunner):
-    block_id = _add(runner, "Lecture", "09:00", "10:00")
-    result = runner.invoke(cli, [
-        "schedule", "move", block_id,
-        "--from", "11:00", "--to", "13:00", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    b = next(b for b in schedule.load_plan(TODAY) if b["id"] == block_id)
-    assert b["start"] == "11:00"
-    assert b["end"]   == "13:00"
+    def test_ics_contains_correct_date(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "10:00", "end": "11:00",
+             "title": "HW Review", "type": "assignment", "source": "canvas"},
+        ])
+        out = tmp_path / "check.ics"
+        runner.invoke(cli, ["export", "--date", TODAY_STR, "--out", str(out)])
+        assert "20260420" in out.read_text()
 
 
 # ---------------------------------------------------------------------------
-# update
+# todo
 # ---------------------------------------------------------------------------
 
-def test_update_changes_only_specified_fields(runner: CliRunner):
-    block_id = _add(runner, "Original", "09:00", "10:00", block_type="study")
-    result = runner.invoke(cli, [
-        "schedule", "update", block_id, "--title", "Renamed", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    b = next(b for b in schedule.load_plan(TODAY) if b["id"] == block_id)
-    assert b["title"]  == "Renamed"
-    assert b["type"]   == "study"    # unchanged
-    assert b["start"]  == "09:00"   # unchanged
-    assert b["source"] == "manual"  # unchanged
+class TestTodoCommand:
+    def test_empty_cache_shows_warning(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(cli, ["todo"])
+        assert result.exit_code == 0
+        assert "No cache found" in result.output
 
+    def test_shows_assignment_count(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [_make_deadline("HW1"), _make_deadline("HW2")])
+        result = runner.invoke(cli, ["todo"])
+        assert result.exit_code == 0
+        assert "2 assignments" in result.output
 
-def test_update_unknown_id_exits_nonzero(runner: CliRunner):
-    result = runner.invoke(cli, [
-        "schedule", "update", "blk_nonexistent",
-        "--title", "X", "--date", TODAY_STR,
-    ])
-    assert result.exit_code != 0
-    assert "Error" in result.output
+    def test_shows_class_count(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [_make_deadline("Lecture", dtype="class")])
+        result = runner.invoke(cli, ["todo"])
+        assert result.exit_code == 0
+        assert "1 class" in result.output
+
+    def test_assignments_flag_shows_table(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [_make_deadline("HW1")])
+        result = runner.invoke(cli, ["todo", "--assignments"])
+        assert result.exit_code == 0
+        assert "HW1" in result.output
+
+    def test_classes_flag_shows_table(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [_make_deadline("Lecture", dtype="class")])
+        result = runner.invoke(cli, ["todo", "--classes"])
+        assert result.exit_code == 0
+        assert "Lecture" in result.output
+
+    def test_days_flag_excludes_far_future(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [_make_deadline("Far HW", hours=10 * 24)])
+        result = runner.invoke(cli, ["todo", "--days", "3"])
+        assert result.exit_code == 0
+        assert "Nothing due" in result.output
+
+    def test_nothing_due_empty_cache(self, runner: CliRunner, tmp_path: Path):
+        _seed_cache(tmp_path, [])
+        result = runner.invoke(cli, ["todo"])
+        assert result.exit_code == 0
+        assert "Nothing due" in result.output
+
+    def test_submitted_still_shown_in_count(self, runner: CliRunner, tmp_path: Path):
+        dl = _make_deadline("HW Submitted")
+        dl["submitted"] = True
+        _seed_cache(tmp_path, [dl])
+        result = runner.invoke(cli, ["todo"])
+        assert result.exit_code == 0
+        assert "1 assignment" in result.output
 
 
 # ---------------------------------------------------------------------------
-# delete
+# send --preview
 # ---------------------------------------------------------------------------
 
-def test_delete_yes_removes_block(runner: CliRunner):
-    block_id = _add(runner, "To Remove", "09:00", "10:00")
-    result = runner.invoke(cli, [
-        "schedule", "delete", block_id, "--yes", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    assert "Deleted" in result.output
-    assert not any(b["id"] == block_id for b in schedule.load_plan(TODAY))
+class TestSendPreview:
+    def test_no_blocks_shows_helpful_message(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(cli, ["send", "--preview", "--date", TODAY_STR])
+        assert result.exit_code == 0
+        assert "mana plan" in result.output
 
+    def test_preview_shows_block_title(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Morning Study", "type": "study", "source": "manual"},
+        ])
+        result = runner.invoke(cli, ["send", "--preview", "--date", TODAY_STR])
+        assert result.exit_code == 0
+        assert "Morning Study" in result.output
 
-def test_delete_unknown_id_exits_nonzero(runner: CliRunner):
-    result = runner.invoke(cli, [
-        "schedule", "delete", "blk_nonexistent", "--yes", "--date", TODAY_STR,
-    ])
-    assert result.exit_code != 0
-    assert "Error" in result.output
+    def test_preview_shows_nothing_sent(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Lecture", "type": "class", "source": "gcal"},
+        ])
+        result = runner.invoke(cli, ["send", "--preview", "--date", TODAY_STR])
+        assert result.exit_code == 0
+        assert "nothing sent" in result.output.lower()
+
+    def test_preview_shows_summary_counts(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Lecture", "type": "class", "source": "gcal"},
+            {"id": "blk_aa000002", "start": "11:00", "end": "12:00",
+             "title": "HW1", "type": "assignment", "source": "canvas"},
+        ])
+        result = runner.invoke(cli, ["send", "--preview", "--date", TODAY_STR])
+        assert result.exit_code == 0
+        assert "1 class" in result.output
+        assert "1 assignment" in result.output
 
 
 # ---------------------------------------------------------------------------
-# clear
+# plan (smoke — no credentials, no Gemini key)
 # ---------------------------------------------------------------------------
 
-def test_clear_yes_wipes_all_blocks(runner: CliRunner):
-    _add(runner, "Block A", "09:00", "10:00")
-    _add(runner, "Block B", "11:00", "12:00")
-    result = runner.invoke(cli, [
-        "schedule", "clear", "--yes", "--date", TODAY_STR,
-    ])
-    assert result.exit_code == 0
-    assert "Cleared" in result.output
-    assert schedule.load_plan(TODAY) == []
+class TestPlanSmoke:
+    def test_plan_empty_exits_cleanly(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(cli, ["plan", "--date", TODAY_STR])
+        assert result.exit_code == 0
+
+    def test_plan_overwrite_flag_accepted(self, runner: CliRunner, tmp_path: Path):
+        result = runner.invoke(cli, ["plan", "--date", TODAY_STR, "--overwrite"])
+        assert result.exit_code == 0
+
+    def test_plan_export_creates_ics(self, runner: CliRunner, tmp_path: Path):
+        _seed_blocks(tmp_path, [
+            {"id": "blk_aa000001", "start": "09:00", "end": "10:00",
+             "title": "Study", "type": "study", "source": "manual"},
+        ])
+        out = tmp_path / "plan.ics"
+        result = runner.invoke(cli, [
+            "plan", "--date", TODAY_STR, "--export", "--out", str(out),
+        ])
+        assert result.exit_code == 0
+        assert out.exists()

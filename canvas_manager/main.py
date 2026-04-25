@@ -455,11 +455,12 @@ def todo(
     """
     reminder_cfg = get_reminder_config()
     lookahead = days if days is not None else reminder_cfg["lookahead_days"]
-    deadlines = _load_cache()
 
-    if not deadlines:
+    if not DEADLINES_CACHE.exists():
         console.print("[yellow]No cache found. Run sync first.[/yellow]")
         return
+
+    deadlines = _load_cache()
 
     now = datetime.now(tz=timezone.utc)
     cutoff = now + timedelta(days=lookahead)
@@ -563,6 +564,46 @@ def clear_cache() -> None:
         return
     DEADLINES_CACHE.unlink()
     console.print(f"[green]✓[/green] Cache deleted. Run [cyan]mana sync[/cyan] to rebuild.")
+
+
+# ---------------------------------------------------------------------------
+# clear-schedule
+# ---------------------------------------------------------------------------
+
+@cli.command("clear-schedule")
+@click.option(
+    "--date", "plan_date",
+    default=None,
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Date to clear (default: today).",
+)
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt.")
+def clear_schedule(plan_date: datetime | None, yes: bool) -> None:
+    """Delete all blocks from a day's schedule.
+
+    \b
+    Examples:
+      mana clear-schedule
+      mana clear-schedule --date 2026-05-01
+      mana clear-schedule --yes
+    """
+    d = plan_date.date() if plan_date else date.today()
+    blocks = _sched.list_blocks(d)
+
+    if not blocks:
+        console.print(f"[yellow]No schedule found for {d} — nothing to clear.[/yellow]")
+        return
+
+    console.print(f"[bold]{len(blocks)} block(s) scheduled for {d}:[/bold]")
+    for b in blocks:
+        console.print(f"  [dim]{b['start']}–{b['end']}[/dim]  {b['title']}")
+
+    if not yes and not Confirm.ask(f"\nDelete all {len(blocks)} block(s)?", default=False):
+        console.print("[dim]Aborted.[/dim]")
+        return
+
+    _sched.save_plan(d, [])
+    console.print(f"[green]✓[/green] Schedule for {d} cleared.")
 
 
 # ---------------------------------------------------------------------------
@@ -766,7 +807,7 @@ def send(
     d = plan_date.date() if plan_date else date.today()
     blocks = _sched.list_blocks(d)
     if not blocks:
-        console.print(f"[yellow]No blocks scheduled for {d}. Run 'plan' first.[/yellow]")
+        console.print(f"[yellow]No blocks scheduled for {d}. Run 'mana plan' first.[/yellow]")
         return
 
     counts = {t: sum(1 for b in blocks if b.get("type") == t)

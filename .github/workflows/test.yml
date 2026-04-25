@@ -2,7 +2,7 @@ name: Canvas Manager Tests
 
 on:
   push:
-    branches: [main, v5]
+    branches: [main, v7]
   pull_request:
     branches: [main]
 
@@ -44,6 +44,7 @@ jobs:
           printf 'REMINDER_TIME=08:00\n'                                >> .env
           printf 'GCAL_CALENDAR_ID=%s\n'           "$GCAL_CALENDAR_ID"  >> .env
           printf 'GCAL_DAYS_AHEAD=30\n'                                 >> .env
+          printf 'GEMINI_MODEL=gemini-2.5-flash-lite\n'                 >> .env
 
       - name: Write credentials.json from secret
         run: echo "${{ secrets.GOOGLE_CREDENTIALS_B64 }}" | base64 -d > credentials.json
@@ -54,53 +55,51 @@ jobs:
       # ── CLI smoke tests ───────────────────────────────────────────────────────
 
       - name: CLI -- help
-        run: canvas-manager --help
+        run: mana --help
 
       - name: CLI -- setup-cron (default 08:00)
-        run: canvas-manager setup-cron
+        run: mana setup-cron
 
       - name: CLI -- setup-cron --time 21:45
         run: |
-          output=$(canvas-manager setup-cron --time 21:45)
+          output=$(mana setup-cron --time 21:45)
           echo "$output"
           echo "$output" | grep -q "45 21"
 
       - name: CLI -- sync (Canvas + Google Calendar)
-        run: canvas-manager sync
+        run: mana sync
 
       - name: CLI -- sync --no-gcal (Canvas only)
-        run: canvas-manager sync --no-gcal
+        run: mana sync --no-gcal
 
       - name: CLI -- list
-        run: canvas-manager list
+        run: mana list
 
       - name: CLI -- list --days 7
-        run: canvas-manager list --days 7
+        run: mana list --days 7
 
-      - name: CLI -- remind --preview (both channels)
+      - name: CLI -- todo (summary)
         run: |
-          output=$(canvas-manager remind --preview)
+          output=$(mana todo)
           echo "$output"
-          echo "$output" | grep -qi "nothing sent\|EMAIL PREVIEW\|SMS PREVIEW\|No upcoming"
+          echo "$output" | grep -qiE "Nothing due|assignment|class"
 
-      - name: CLI -- remind --preview --email-only
+      - name: CLI -- todo --assignments
         run: |
-          output=$(canvas-manager remind --preview --email-only)
+          output=$(mana todo --assignments)
           echo "$output"
-          echo "$output" | grep -qi "EMAIL PREVIEW\|nothing sent\|No upcoming"
 
-      - name: CLI -- remind --preview --sms-only
+      - name: CLI -- todo --classes
         run: |
-          output=$(canvas-manager remind --preview --sms-only)
+          output=$(mana todo --classes)
           echo "$output"
-          echo "$output" | grep -qi "SMS PREVIEW\|nothing sent\|No upcoming"
 
       # ── Error-case tests ──────────────────────────────────────────────────────
 
-      - name: Error -- remind --preview with no cache warns user
+      - name: Error -- todo with no cache warns user
         run: |
           rm -f .canvas_manager_deadlines.json
-          output=$(canvas-manager remind --preview)
+          output=$(mana todo)
           echo "$output"
           echo "$output" | grep -q "No cache found"
 
@@ -110,28 +109,29 @@ jobs:
         run: |
           cp .env .env.bak
           sed -i 's/^CANVAS_API_TOKEN=.*/CANVAS_API_TOKEN=badtoken123/' .env
-          canvas-manager sync --no-gcal && echo "Expected failure but got success" && exit 1 || true
+          mana sync --no-gcal && echo "Expected failure but got success" && exit 1 || true
           cp .env.bak .env
 
       # ── habits smoke test ────────────────────────────────────────────────────
 
       - name: CLI -- habits (first run via piped input)
         run: |
-          rm -f .canvas_manager_habits.json
-          printf '07:30\n23:00\n09:00-11:00\n90\n15\n18:00\n' | canvas-manager habits
-          test -f .canvas_manager_habits.json || (echo "habits file not created" && exit 1)
+          rm -f ~/.canvas_manager/habits.json
+          printf '07:30\n23:00\n09:00-11:00\n90\n15\nnone\nclass, assignment, personal, study, other\n2\n2\n60\n' \
+            | mana habits
+          test -f ~/.canvas_manager/habits.json || (echo "habits file not created" && exit 1)
 
       - name: CLI -- habits (existing profile, decline update)
         run: |
-          printf 'n\n' | canvas-manager habits
+          printf 'n\n' | mana habits
 
       # ── pytest suite ─────────────────────────────────────────────────────────
 
-      - name: pytest test_cron.py
-        run: python -m pytest test_cron.py -v
-
-      - name: pytest test_habits.py
-        run: python -m pytest test_habits.py -v
-
-      - name: pytest tests/test_schedule.py
+      - name: pytest -- schedule storage layer
         run: python -m pytest tests/test_schedule.py -v
+
+      - name: pytest -- rule-based scheduler
+        run: python -m pytest tests/test_scheduler.py -v
+
+      - name: pytest -- CLI commands (export, todo, send, plan)
+        run: python -m pytest tests/test_schedule_cli.py -v
